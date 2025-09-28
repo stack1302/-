@@ -1,4 +1,4 @@
-name: "🗂️ Mass Dir + 📀 ISO Builder"
+name: "🗂️ Mass Dir + 📀 ISO Builder (Upgrade+Auto-Commit)"
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
         required: true
         default: "sub-"
       options:
-        description: "CSV 플래그: gen,placeholders,commit,rock,joliet 중 선택"
+        description: "CSV 플래그: gen,placeholders,rock,joliet"
         required: true
         default: "gen,placeholders,rock,joliet"
       iso_source_dir:
@@ -40,9 +40,9 @@ on:
         required: true
         default: "GITHUB_DIR"
       commit_message:
-        description: "commit 옵션 사용 시 커밋 메시지"
+        description: "자동 커밋 메시지"
         required: false
-        default: "chore(mass-dir): add generated directories"
+        default: "chore(mass-dir): upgrade logs + generated directories"
 
 permissions:
   contents: write
@@ -52,8 +52,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate:
-    name: "Generate Mass Directories (optional)"
+  build:
     runs-on: ubuntu-latest
     env:
       ROOT_DIR: ${{ inputs.root_dir }}
@@ -62,6 +61,10 @@ jobs:
       PREF: ${{ inputs.prefix }}
       SUBP: ${{ inputs.sub_prefix }}
       OPTIONS: ${{ inputs.options }}
+      SRC_DIR: ${{ inputs.iso_source_dir }}
+      ISO_NAME: ${{ inputs.iso_output_name }}
+      ISO_LABEL: ${{ inputs.iso_label }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,11 +75,49 @@ jobs:
         run: |
           set -Eeuo pipefail
           has_flag(){ [[ ",${OPTIONS}," == *",$1,"* ]]; }
-          echo "gen=$( has_flag gen && echo true || echo false )"       >> $GITHUB_OUTPUT
-          echo "placeholders=$( has_flag placeholders && echo true || echo false )" >> $GITHUB_OUTPUT
-          echo "commit=$( has_flag commit && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "gen=$( has_flag gen && echo true || echo false )"         >> "$GITHUB_OUTPUT"
+          echo "placeholders=$( has_flag placeholders && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          echo "rock=$( has_flag rock && echo true || echo false )"       >> "$GITHUB_OUTPUT"
+          echo "joliet=$( has_flag joliet && echo true || echo false )"   >> "$GITHUB_OUTPUT"
 
-      - name: Validate inputs & safety
+      - name: System upgrade & report (mandatory)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REPORT_DIR=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "${REPORT_DIR}"
+
+          {
+            echo "# System Upgrade Report"
+            echo "- Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- Kernel: $(uname -a)"
+            command -v lsb_release >/dev/null 2>&1 && lsb_release -a || true
+            echo
+            echo "## Upgradable (before)"
+          } > "${REPORT_DIR}/UPGRADE.md"
+
+          apt -v   > "${REPORT_DIR}/apt-version.txt" 2>&1 || true
+          dpkg -l  > "${REPORT_DIR}/packages.before.txt" 2>&1 || true
+          apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.before.txt" || true
+
+          # 실제 업그레이드
+          sudo apt-get update -y
+          sudo apt-get -y upgrade
+
+          echo >> "${REPORT_DIR}/UPGRADE.md"
+          echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
+          apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.after.txt" || true
+          dpkg -l  > "${REPORT_DIR}/packages.after.txt" 2>&1 || true
+
+          {
+            echo
+            echo "### Summary"
+            echo "- Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- Files:"
+            ls -1 "${REPORT_DIR}"
+          } >> "${REPORT_DIR}/UPGRADE.md"
+
+      - name: Validate inputs & safety (only when gen)
         if: ${{ steps.flags.outputs.gen == 'true' }}
         shell: bash
         run: |
@@ -89,7 +130,7 @@ jobs:
           [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir가 비었습니다."; exit 1; }
           mkdir -p "${SAFE_ROOT}"
 
-      - name: Create mass directories
+      - name: Create mass directories (optional by flag)
         if: ${{ steps.flags.outputs.gen == 'true' }}
         shell: bash
         env:
@@ -97,6 +138,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           ROOT="${ROOT_DIR#./}"
+
           pad(){ printf "%0${1}d" "${2}"; }
           width_top=${#TOP}; (( width_top < 3 )) && width_top=3
           width_sub=${#SUB}; (( width_sub < 2 )) && width_sub=2
@@ -133,54 +175,34 @@ jobs:
           } > .github/mass-dir-report/DIRECTORY_TREE.md
           find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
 
-      - name: Commit & Push (optional)
-        if: ${{ steps.flags.outputs.gen == 'true' && steps.flags.outputs.commit == 'true' }}
+      - name: Mandatory Commit & Push (always)
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${ROOT_DIR}" .github/mass-dir-report || true
-          if ! git diff --cached --quiet; then
-            git commit -m "${{ inputs.commit_message }}"
-            git push
-          else
-            echo "커밋할 변경 사항이 없습니다."
+
+          # 변경 사항 추가 (업그레이드 리포트 + 생성 디렉토리 + 생성 리포트)
+          git add ".github/upgrade-report" || true
+          if [ -d "${ROOT_DIR}" ]; then
+            git add "${ROOT_DIR}" || true
+          fi
+          if [ -d ".github/mass-dir-report" ]; then
+            git add ".github/mass-dir-report" || true
           fi
 
-      - name: Upload artifact (listing & report)
-        if: ${{ steps.flags.outputs.gen == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: mass-dir-listing
-          path: |
-            .github/mass-dir-report/DIRECTORY_TREE.md
-            .github/mass-dir-report/top_dirs.txt
-          if-no-files-found: error
+          # 커밋 & 푸시 (변경이 없으면 dummy 변경 생성 후 커밋 보장)
+          if git diff --cached --quiet; then
+            echo "No staged changes detected. Creating a dummy trace file to ensure commit."
+            mkdir -p .github/commit-trace
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/commit-trace/last-run.txt
+            git add .github/commit-trace/last-run.txt
+          fi
 
-  iso:
-    name: "Build ISO"
-    runs-on: ubuntu-latest
-    needs: [generate]
-    env:
-      SRC_DIR: ${{ inputs.iso_source_dir }}
-      ISO_NAME: ${{ inputs.iso_output_name }}
-      ISO_LABEL: ${{ inputs.iso_label }}
-      OPTIONS: ${{ inputs.options }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          git commit -m "${{ inputs.commit_message }}"
+          git push
 
-      - name: Parse flags
-        id: iso_flags
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          has_flag(){ [[ ",${OPTIONS}," == *",$1,"* ]]; }
-          echo "rock=$( has_flag rock && echo true || echo false )"   >> $GITHUB_OUTPUT
-          echo "joliet=$( has_flag joliet && echo true || echo false )" >> $GITHUB_OUTPUT
-
-      - name: Validate source dir & prepare staging
+      - name: Validate source dir & prepare staging (for ISO)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -202,8 +224,8 @@ jobs:
       - name: Build ISO
         shell: bash
         env:
-          ROCK: ${{ steps.iso_flags.outputs.rock }}
-          JOLIET: ${{ steps.iso_flags.outputs.joliet }}
+          ROCK: ${{ steps.flags.outputs.rock }}
+          JOLIET: ${{ steps.flags.outputs.joliet }}
         run: |
           set -Eeuo pipefail
           OUT="iso_build/${ISO_NAME}.iso"
