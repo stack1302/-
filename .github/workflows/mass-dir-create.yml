@@ -1,0 +1,157 @@
+name: "🗂️ Mass Directory Creator"
+
+on:
+  workflow_dispatch:
+    inputs:
+      root_dir:
+        description: "생성 기준 경로(리포지토리 루트 기준)"
+        required: true
+        default: ".github/echo_mass"
+      top_count:
+        description: "최상위 디렉토리 개수 (예: 1000)"
+        required: true
+        default: "1000"
+      sub_count:
+        description: "각 최상위 디렉토리 아래 하위 디렉토리 개수 (0=없음)"
+        required: true
+        default: "5"
+      prefix:
+        description: "디렉토리 접두어 (예: dir-)"
+        required: true
+        default: "dir-"
+      sub_prefix:
+        description: "하위 디렉토리 접두어 (예: sub-)"
+        required: true
+        default: "sub-"
+      add_placeholder_files:
+        description: ".keep/README.md 등 플레이스홀더 파일 생성 여부 (true/false)"
+        required: true
+        default: "true"
+      commit_changes:
+        description: "변경사항 커밋/푸시 여부 (true/false)"
+        required: true
+        default: "false"
+      commit_message:
+        description: "커밋 메시지 (commit_changes=true일 때 사용)"
+        required: false
+        default: "chore(mass-dir): add generated directories"
+      artifact_name:
+        description: "아티팩트 이름"
+        required: true
+        default: "mass-dir-listing"
+
+permissions:
+  contents: write  # 커밋/푸시 옵션을 위해 필요
+
+concurrency:
+  group: mass-dir-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      ROOT_DIR: ${{ inputs.root_dir }}
+      TOP: ${{ inputs.top_count }}
+      SUB: ${{ inputs.sub_count }}
+      PREF: ${{ inputs.prefix }}
+      SUBP: ${{ inputs.sub_prefix }}
+      ADD_FILES: ${{ inputs.add_placeholder_files }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs & safety guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 숫자 검증
+          [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수여야 합니다"; exit 1; }
+          [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수여야 합니다"; exit 1; }
+
+          # 안전 가드(너무 큰 값 방지): 필요 시 상향 조정
+          MAX_TOP=20000
+          if (( TOP > MAX_TOP )); then
+            echo "top_count=${TOP} 가드 초과(MAX_TOP=${MAX_TOP}). 값을 낮춰주세요."
+            exit 1
+          fi
+
+          # 경로 정규화 및 생성
+          SAFE_ROOT="${ROOT_DIR#./}"
+          [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir가 비었습니다."; exit 1; }
+          mkdir -p "${SAFE_ROOT}"
+
+      - name: Create mass directories
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="${ROOT_DIR#./}"
+
+          # 001, 002 포맷을 위한 폭 계산
+          pad() { printf "%0${1}d" "${2}"; }
+
+          width_top=${#TOP}
+          (( width_top < 3 )) && width_top=3
+          width_sub=${#SUB}
+          (( width_sub < 2 )) && width_sub=2
+
+          for i in $(seq 1 "${TOP}"); do
+            idx_top=$(pad "${width_top}" "${i}")
+            D="${ROOT}/${PREF}${idx_top}"
+            mkdir -p "${D}"
+            if [[ "${ADD_FILES}" == "true" ]]; then
+              [[ -f "${D}/.keep" ]] || printf "placeholder for %s\n" "${D}" > "${D}/.keep"
+              [[ -f "${D}/README.md" ]] || printf "# %s\n\nAuto-generated directory.\n" "$(basename "${D}")" > "${D}/README.md"
+            fi
+
+            if (( SUB > 0 )); then
+              for j in $(seq 1 "${SUB}"); do
+                idx_sub=$(pad "${width_sub}" "${j}")
+                SD="${D}/${SUBP}${idx_sub}"
+                mkdir -p "${SD}"
+                if [[ "${ADD_FILES}" == "true" ]]; then
+                  [[ -f "${SD}/.keep" ]] || printf "placeholder for %s\n" "${SD}" > "${SD}/.keep"
+                fi
+              done
+            fi
+          done
+
+          # 트리 목록 저장(gnu tree 없을 수 있으니 find 사용)
+          mkdir -p .github/mass-dir-report
+          { 
+            echo "# Directory Listing"
+            echo
+            echo "- Root: ${ROOT}"
+            echo "- Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo
+            echo '```'
+            find "${ROOT}" -type d | sort
+            echo '```'
+          } > .github/mass-dir-report/DIRECTORY_TREE.md
+
+          find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
+          echo "OK"
+
+      - name: Commit & Push (optional)
+        if: ${{ inputs.commit_changes == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${ROOT_DIR}" .github/mass-dir-report || true
+          if ! git diff --cached --quiet; then
+            git commit -m "${{ inputs.commit_message }}"
+            git push
+          else
+            echo "커밋할 변경 사항이 없습니다."
+          fi
+
+      - name: Upload artifact (listing & report)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: |
+            .github/mass-dir-report/DIRECTORY_TREE.md
+            .github/mass-dir-report/top_dirs.txt
+          if-no-files-found: error
