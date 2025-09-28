@@ -1,8 +1,8 @@
-name: "🗂️ Mass Dir + 📀 ISO Builder + 📦 Packages + 🚀 Release (q10m)"
+name: "🗂️ Mass Dir + 📀 ISO + 📦 Packages + 🚀 Release (q10m, safe tag/files)"
 
 on:
   schedule:
-    - cron: "*/10 * * * *"     # 10분마다 수행
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       root_dir:
@@ -28,7 +28,7 @@ on:
       options:
         description: "CSV 플래그: gen,placeholders,rock,joliet,release,pkgzip,pkgtar"
         required: true
-        default: "gen,placeholders,rock,joliet,release,pkgzip,pkgtar"
+        default: "gen,placeholders,rock,joliet,pkgzip,pkgtar" # 스케줄 기본값: release 제외 권장
       iso_source_dir:
         description: "ISO로 묶을 소스 디렉토리"
         required: true
@@ -42,12 +42,12 @@ on:
         required: true
         default: "GITHUB_DIR"
       commit_message:
-        description: "자동 커밋 메시지"
+        description: "자동 커밋 메시지(비워도 자동 생성)"
         required: false
-        default: "chore(mass-dir): dpkg-clean + upgrade logs + generated dirs + test-server + packages + release"
+        default: ""
 
 permissions:
-  contents: write    # 커밋/푸시 & 릴리즈 업로드에 필요
+  contents: write
 
 concurrency:
   group: mass-dir-iso-${{ github.ref }}
@@ -57,15 +57,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      ROOT_DIR: ${{ inputs.root_dir }}
-      TOP: ${{ inputs.top_count }}
-      SUB: ${{ inputs.sub_count }}
-      PREF: ${{ inputs.prefix }}
-      SUBP: ${{ inputs.sub_prefix }}
-      OPTIONS: ${{ inputs.options }}
-      SRC_DIR: ${{ inputs.iso_source_dir }}
-      ISO_NAME: ${{ inputs.iso_output_name }}
-      ISO_LABEL: ${{ inputs.iso_label }}
+      ROOT_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.root_dir) || '.github/echo_mass' }}
+      TOP: ${{ (github.event_name == 'workflow_dispatch' && inputs.top_count) || '1000' }}
+      SUB: ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_count) || '5' }}
+      PREF: ${{ (github.event_name == 'workflow_dispatch' && inputs.prefix) || 'dir-' }}
+      SUBP: ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_prefix) || 'sub-' }}
+      OPTIONS: ${{ (github.event_name == 'workflow_dispatch' && inputs.options) || 'gen,placeholders,rock,joliet,pkgzip,pkgtar' }}
+      SRC_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_source_dir) || '.github' }}
+      ISO_NAME: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_output_name) || 'github-dir' }}
+      ISO_LABEL: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_label) || 'GITHUB_DIR' }}
+      COMMIT_MSG_IN: ${{ (github.event_name == 'workflow_dispatch' && inputs.commit_message) || '' }}
 
     steps:
       - name: Checkout
@@ -77,16 +78,18 @@ jobs:
         run: |
           set -Eeuo pipefail
           has_flag(){ [[ ",${OPTIONS}," == *",$1,"* ]]; }
-          echo "gen=$( has_flag gen && echo true || echo false )"           >> "$GITHUB_OUTPUT"
-          echo "placeholders=$( has_flag placeholders && echo true || echo false )" >> "$GITHUB_OUTPUT"
-          echo "rock=$( has_flag rock && echo true || echo false )"         >> "$GITHUB_OUTPUT"
-          echo "joliet=$( has_flag joliet && echo true || echo false )"     >> "$GITHUB_OUTPUT"
-          echo "release=$( has_flag release && echo true || echo false )"   >> "$GITHUB_OUTPUT"
-          echo "pkgzip=$( has_flag pkgzip && echo true || echo false )"     >> "$GITHUB_OUTPUT"
-          echo "pkgtar=$( has_flag pkgtar && echo true || echo false )"     >> "$GITHUB_OUTPUT"
+          {
+            echo "gen=$( has_flag gen && echo true || echo false )"
+            echo "placeholders=$( has_flag placeholders && echo true || echo false )"
+            echo "rock=$( has_flag rock && echo true || echo false )"
+            echo "joliet=$( has_flag joliet && echo true || echo false )"
+            echo "release=$( has_flag release && echo true || echo false )"
+            echo "pkgzip=$( has_flag pkgzip && echo true || echo false )"
+            echo "pkgtar=$( has_flag pkgtar && echo true || echo false )"
+          } >> "$GITHUB_OUTPUT"
 
-      # ── dpkg 경고 예방 사전 정리 ─────────────────────────────────────
-      - name: Pre-clean dpkg leftover dirs (prevent warnings)
+      # --- dpkg 경고 예방 사전 정리 ---
+      - name: Pre-clean dpkg leftover dirs
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -99,8 +102,8 @@ jobs:
           clean_dir "/etc/apport/blacklist.d"
           [ -d /etc/apport ] && sudo find /etc/apport -type d -empty -exec rmdir {} \; 2>/dev/null | tee -a "${CLEAN_LOG}" || true
 
-      # ── 시스템 업그레이드(강제) ─────────────────────────────────────
-      - name: System upgrade & report (mandatory)
+      # --- 시스템 업그레이드 ---
+      - name: System upgrade & report
         shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -113,8 +116,7 @@ jobs:
             echo "- Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "- Kernel: $(uname -a)"
             command -v lsb_release >/dev/null 2>&1 && lsb_release -a || true
-            echo
-            echo "## Upgradable (before)"
+            echo; echo "## Upgradable (before)"
           } > "${REPORT_DIR}/UPGRADE.md"
           apt -v   > "${REPORT_DIR}/apt-version.txt" 2>&1 || true
           dpkg -l  > "${REPORT_DIR}/packages.before.txt" 2>&1 || true
@@ -129,14 +131,9 @@ jobs:
           echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.after.txt" || true
           dpkg -l  > "${REPORT_DIR}/packages.after.txt" 2>&1 || true
-          {
-            echo
-            echo "### Summary"
-            echo "- Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "- Files:"; ls -1 "${REPORT_DIR}"
-          } >> "${REPORT_DIR}/UPGRADE.md"
+          { echo; echo "### Summary"; echo "- Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "- Files:"; ls -1 "${REPORT_DIR}"; } >> "${REPORT_DIR}/UPGRADE.md"
 
-      - name: Post-verify dpkg warnings and re-clean if needed
+      - name: Post-verify dpkg warnings
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -152,14 +149,14 @@ jobs:
             echo "[postclean] no dpkg directory warnings" | tee -a "${CLEAN}"
           fi
 
-      # ── (옵션) 대량 디렉토리 생성 ──────────────────────────────────
+      # --- (옵션) 대량 디렉토리 ---
       - name: Validate inputs & safety (only when gen)
         if: ${{ steps.flags.outputs.gen == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수여야 합니다"; exit 1; }
-          [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수여야 합니다"; exit 1; }
+          [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수"; exit 1; }
+          [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수"; exit 1; }
           (( TOP <= 20000 )) || { echo "top_count 과다"; exit 1; }
           SAFE_ROOT="${ROOT_DIR#./}"; [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir 비었음"; exit 1; }
           mkdir -p "${SAFE_ROOT}"
@@ -195,15 +192,10 @@ jobs:
             fi
           done
           mkdir -p .github/mass-dir-report
-          {
-            echo "# Directory Listing"
-            echo "- Root: ${ROOT}"
-            echo "- Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-            echo; echo '```'; find "${ROOT}" -type d | sort; echo '```'
-          } > .github/mass-dir-report/DIRECTORY_TREE.md
+          { echo "# Directory Listing"; echo "- Root: ${ROOT}"; echo "- Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"; echo; echo '```'; find "${ROOT}" -type d | sort; echo '```'; } > .github/mass-dir-report/DIRECTORY_TREE.md
           find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
 
-      # ── 테스트 서버 ───────────────────────────────────────────────
+      # --- 테스트 서버 ---
       - name: Prepare test server content
         shell: bash
         run: |
@@ -239,26 +231,34 @@ jobs:
           [ -f "${TS}/server.pid" ] && kill "$(cat "${TS}/server.pid")" 2>/dev/null || true
           sleep 1; pkill -f "python3 -m http.server 8080" 2>/dev/null || true
 
-      # ── 커밋/푸시(항상) ──────────────────────────────────────────
-      - name: Mandatory Commit & Push (always)
+      # --- 커밋/푸시(항상) ---
+      - name: Mandatory Commit & Push (always, safe message)
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add ".github/upgrade-report" || true
           [ -d "${ROOT_DIR}" ] && git add "${ROOT_DIR}" || true
           [ -d ".github/mass-dir-report" ] && git add ".github/mass-dir-report" || true
           git add ".github/test-server" || true
+
           if git diff --cached --quiet; then
             mkdir -p .github/commit-trace
             date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/commit-trace/last-run.txt
             git add .github/commit-trace/last-run.txt
           fi
-          git commit -m "${{ inputs.commit_message }}"
+
+          COMMIT_MSG="${COMMIT_MSG_IN}"
+          if [ -z "${COMMIT_MSG}" ]; then
+            COMMIT_MSG="chore(auto): $(date -u +%Y-%m-%dT%H:%M:%SZ) run ${GITHUB_RUN_ID}#${GITHUB_RUN_NUMBER} (${GITHUB_EVENT_NAME})"
+          fi
+
+          git commit -m "${COMMIT_MSG}" || { echo "No changes to commit"; exit 0; }
           git push
 
-      # ── ISO 빌드 ─────────────────────────────────────────────────
+      # --- ISO/패키지 빌드 ---
       - name: Validate source dir & prepare staging (for ISO)
         shell: bash
         run: |
@@ -289,11 +289,10 @@ jobs:
           [[ "${JOLIET}" == "true" ]] && J_FLAG="-J"
           xorriso -as mkisofs ${RR_FLAG} ${J_FLAG} -V "${LABEL}" -input-charset utf-8 -o "${OUT}" iso_build/staging
           test -s "${OUT}"
-          sha256sum "${OUT}" > "${OUT}.sha256"
-          md5sum    "${OUT}" > "${OUT}.md5"
+          sha256sum "${OUT}" > "iso_build/${ISO_NAME}.sha256"
+          md5sum    "${OUT}" > "iso_build/${ISO_NAME}.md5"
           isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
 
-      # ── 패키지(Zip/Tar.gz) 생성 ──────────────────────────────────
       - name: Package source dir (zip/tar.gz) as requested
         shell: bash
         env:
@@ -303,59 +302,75 @@ jobs:
           set -Eeuo pipefail
           SRC="${SRC_DIR#./}"
           TS=$(date -u +%Y%m%dT%H%M%SZ)
-          # 소스 디렉토리 패키징
           if [[ "${PKGZIP}" == "true" ]]; then
             (cd iso_build/staging && zip -r "../../packages/${SRC}-src-${TS}.zip" "${SRC}")
             sha256sum "packages/${SRC}-src-${TS}.zip" > "packages/${SRC}-src-${TS}.zip.sha256"
+            # ISO zip도 생성
+            zip -j "packages/${ISO_NAME}-${TS}.iso.zip" "iso_build/${ISO_NAME}.iso"
+            sha256sum "packages/${ISO_NAME}-${TS}.iso.zip" > "packages/${ISO_NAME}-${TS}.iso.zip.sha256"
           fi
           if [[ "${PKGTAR}" == "true" ]]; then
             (cd iso_build/staging && tar -czf "../../packages/${SRC}-src-${TS}.tar.gz" "${SRC}")
             sha256sum "packages/${SRC}-src-${TS}.tar.gz" > "packages/${SRC}-src-${TS}.tar.gz.sha256"
           fi
-          # ISO 자체도 zip으로 감싸기(선택적으로 유용)
-          if [[ "${PKGZIP}" == "true" ]]; then
-            zip -j "packages/${ISO_NAME}-${TS}.iso.zip" "iso_build/${ISO_NAME}.iso"
-            sha256sum "packages/${ISO_NAME}-${TS}.iso.zip" > "packages/${ISO_NAME}-${TS}.iso.zip.sha256"
-          fi
 
       - name: Upload artifacts (ISO + Packages + Logs)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.iso_output_name }}-iso-packages-and-logs
+          name: ${{ env.ISO_NAME }}-iso-packages-and-logs
           path: |
-            iso_build/${{ inputs.iso_output_name }}.iso
-            iso_build/${{ inputs.iso_output_name }}.sha256
-            iso_build/${{ inputs.iso_output_name }}.md5
-            iso_build/${{ inputs.iso_output_name }}.filelist.txt
+            iso_build/${{ env.ISO_NAME }}.iso
+            iso_build/${{ env.ISO_NAME }}.sha256
+            iso_build/${{ env.ISO_NAME }}.md5
+            iso_build/${{ env.ISO_NAME }}.filelist.txt
             packages/*
             .github/test-server/server.log
             .github/test-server/curl-health.log
           if-no-files-found: warn
 
-      # ── 릴리즈 생성/업로드 (옵션 release) ─────────────────────────
-      - name: Create GitHub Release (tagged) and upload assets
+      # --- 릴리즈 태그/이름/파일 목록 준비 (여기서만 쉘 변수 사용) ---
+      - name: Compute release metadata
+        id: relmeta
+        if: ${{ steps.flags.outputs.release == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          NAME="Auto Release — ${ISO_NAME} @ Run #${GITHUB_RUN_NUMBER}"
+          echo "tag=${TAG}"   >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          # 존재하는 파일만 리스트업
+          FILES=""
+          for f in \
+            "iso_build/${ISO_NAME}.iso" \
+            "iso_build/${ISO_NAME}.sha256" \
+            "iso_build/${ISO_NAME}.md5" \
+            "iso_build/${ISO_NAME}.filelist.txt" \
+            packages/* ; do
+            [ -e "$f" ] && FILES="${FILES}${f}\n"
+          done
+          printf "%b" "$FILES" > files.txt
+          # GitHub Actions에서 멀티라인 출력을 위한 안전 처리
+          FILES_ESCAPED=$(perl -pe 's/%/%25/g; s/\n/%0A/g; s/\r/%0D/g' files.txt)
+          echo "files=${FILES_ESCAPED}" >> "$GITHUB_OUTPUT"
+
+      # --- 릴리즈 생성/업로드 ---
+      - name: Create GitHub Release and upload assets
         if: ${{ steps.flags.outputs.release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_id }}-${{ github.run_number }}-$(date +%Y%m%d%H%M%S)
-          name: "Auto Release — ${{ inputs.iso_output_name }} @ ${{ github.run_number }}"
+          tag_name: ${{ steps.relmeta.outputs.tag }}
+          name: ${{ steps.relmeta.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
           body: |
             ## Automated Release
-            - Source: `${{ inputs.iso_source_dir }}`
-            - ISO Label: `${{ inputs.iso_label }}`
-            - Options: `${{ inputs.options }}`
+            - Source: `${{ env.SRC_DIR }}`
+            - ISO Label: `${{ env.ISO_LABEL }}`
+            - Options: `${{ env.OPTIONS }}`
             - Run: `${{ github.run_id }} / ${{ github.run_number }}`
-            - Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-            ### Included Artifacts
-            - ISO + checksums + filelist
-            - Packages (zip/tar.gz as requested)
-            - Test server logs
-          files: |
-            iso_build/${{ inputs.iso_output_name }}.iso
-            iso_build/${{ inputs.iso_output_name }}.sha256
-            iso_build/${{ inputs.iso_output_name }}.md5
-            iso_build/${{ inputs.iso_output_name }}.filelist.txt
-            packages/*
+            - Time (UTC): ${{ github.run_started_at }}
+          files: ${{ steps.relmeta.outputs.files }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
