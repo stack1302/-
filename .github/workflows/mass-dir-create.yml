@@ -1,14 +1,19 @@
-name: "🗂️ Mass Directory Creator"
+name: "🗂️ Mass Dir + 📀 ISO Builder"
 
 on:
   workflow_dispatch:
     inputs:
+      # ──[1] 대량 디렉토리 생성 옵션 ─────────────────────────────
+      do_generate_dirs:
+        description: "대량 디렉토리 생성 수행 여부 (true/false)"
+        required: true
+        default: "false"
       root_dir:
         description: "생성 기준 경로(리포지토리 루트 기준)"
         required: true
         default: ".github/echo_mass"
       top_count:
-        description: "최상위 디렉토리 개수 (예: 1000)"
+        description: "최상위 디렉토리 개수"
         required: true
         default: "1000"
       sub_count:
@@ -16,11 +21,11 @@ on:
         required: true
         default: "5"
       prefix:
-        description: "디렉토리 접두어 (예: dir-)"
+        description: "디렉토리 접두어"
         required: true
         default: "dir-"
       sub_prefix:
-        description: "하위 디렉토리 접두어 (예: sub-)"
+        description: "하위 디렉토리 접두어"
         required: true
         default: "sub-"
       add_placeholder_files:
@@ -28,28 +33,48 @@ on:
         required: true
         default: "true"
       commit_changes:
-        description: "변경사항 커밋/푸시 여부 (true/false)"
+        description: "생성 결과 커밋/푸시 (true/false)"
         required: true
         default: "false"
       commit_message:
-        description: "커밋 메시지 (commit_changes=true일 때 사용)"
+        description: "커밋 메시지"
         required: false
         default: "chore(mass-dir): add generated directories"
-      artifact_name:
-        description: "아티팩트 이름"
+
+      # ──[2] ISO 빌드 옵션 ───────────────────────────────────────
+      iso_source_dir:
+        description: "ISO로 묶을 소스 디렉토리 (기본: .github)"
         required: true
-        default: "mass-dir-listing"
+        default: ".github"
+      iso_output_name:
+        description: "출력 ISO 파일명(확장자 .iso 자동 부여 않음)"
+        required: true
+        default: "github-dir"
+      iso_label:
+        description: "ISO 볼륨 라벨(최대 32자 권장)"
+        required: true
+        default: "GITHUB_DIR"
+      enable_rockridge:
+        description: "Rock Ridge(-R) 사용 (긴 파일명/권한 보존)"
+        required: true
+        default: "true"
+      enable_joliet:
+        description: "Joliet(-J) 사용 (Windows 호환 긴 파일명)"
+        required: true
+        default: "true"
 
 permissions:
-  contents: write  # 커밋/푸시 옵션을 위해 필요
+  contents: write  # commit_changes=true일 때 필요. 아니면 사용 안 됨.
 
 concurrency:
-  group: mass-dir-${{ github.ref }}
+  group: mass-dir-iso-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   generate:
+    name: "Generate Mass Directories (optional)"
     runs-on: ubuntu-latest
+    if: ${{ inputs.do_generate_dirs == 'true' }}
     env:
       ROOT_DIR: ${{ inputs.root_dir }}
       TOP: ${{ inputs.top_count }}
@@ -65,18 +90,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 숫자 검증
           [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수여야 합니다"; exit 1; }
           [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수여야 합니다"; exit 1; }
-
-          # 안전 가드(너무 큰 값 방지): 필요 시 상향 조정
           MAX_TOP=20000
           if (( TOP > MAX_TOP )); then
-            echo "top_count=${TOP} 가드 초과(MAX_TOP=${MAX_TOP}). 값을 낮춰주세요."
-            exit 1
+            echo "top_count=${TOP} > MAX_TOP=${MAX_TOP} (가드 초과). 값을 낮춰주세요."; exit 1
           fi
-
-          # 경로 정규화 및 생성
           SAFE_ROOT="${ROOT_DIR#./}"
           [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir가 비었습니다."; exit 1; }
           mkdir -p "${SAFE_ROOT}"
@@ -87,13 +106,9 @@ jobs:
           set -Eeuo pipefail
           ROOT="${ROOT_DIR#./}"
 
-          # 001, 002 포맷을 위한 폭 계산
           pad() { printf "%0${1}d" "${2}"; }
-
-          width_top=${#TOP}
-          (( width_top < 3 )) && width_top=3
-          width_sub=${#SUB}
-          (( width_sub < 2 )) && width_sub=2
+          width_top=${#TOP}; (( width_top < 3 )) && width_top=3
+          width_sub=${#SUB}; (( width_sub < 2 )) && width_sub=2
 
           for i in $(seq 1 "${TOP}"); do
             idx_top=$(pad "${width_top}" "${i}")
@@ -103,7 +118,6 @@ jobs:
               [[ -f "${D}/.keep" ]] || printf "placeholder for %s\n" "${D}" > "${D}/.keep"
               [[ -f "${D}/README.md" ]] || printf "# %s\n\nAuto-generated directory.\n" "$(basename "${D}")" > "${D}/README.md"
             fi
-
             if (( SUB > 0 )); then
               for j in $(seq 1 "${SUB}"); do
                 idx_sub=$(pad "${width_sub}" "${j}")
@@ -116,9 +130,8 @@ jobs:
             fi
           done
 
-          # 트리 목록 저장(gnu tree 없을 수 있으니 find 사용)
           mkdir -p .github/mass-dir-report
-          { 
+          {
             echo "# Directory Listing"
             echo
             echo "- Root: ${ROOT}"
@@ -137,7 +150,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "${ROOT_DIR}" .github/mass-dir-report || true
           if ! git diff --cached --quiet; then
@@ -150,8 +163,83 @@ jobs:
       - name: Upload artifact (listing & report)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}
+          name: mass-dir-listing
           path: |
             .github/mass-dir-report/DIRECTORY_TREE.md
             .github/mass-dir-report/top_dirs.txt
+          if-no-files-found: error
+
+  iso:
+    name: "Build ISO from .github (or specified dir)"
+    runs-on: ubuntu-latest
+    needs: [generate]
+    if: ${{ always() }}  # generate가 생략되더라도 ISO는 단독 실행 가능
+    env:
+      SRC_DIR: ${{ inputs.iso_source_dir }}
+      ISO_NAME: ${{ inputs.iso_output_name }}
+      ISO_LABEL: ${{ inputs.iso_label }}
+      ROCK: ${{ inputs.enable_rockridge }}
+      JOLIET: ${{ inputs.enable_joliet }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate source dir & prepare staging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SRC="${SRC_DIR#./}"
+          [[ -d "${SRC}" ]] || { echo "소스 디렉토리(${SRC_DIR})가 존재하지 않습니다."; exit 1; }
+          mkdir -p iso_build/staging
+          # 소스 동결(권장): .gitignore 무시하고 전체 복사
+          rsync -a --delete "${SRC}/" "iso_build/staging/${SRC}/"
+          # 목록/메타 생성
+          mkdir -p iso_build/meta
+          find "iso_build/staging/${SRC}" -mindepth 1 -maxdepth 1 -type d | sort > iso_build/meta/top_dirs.txt || true
+          find "iso_build/staging/${SRC}" -type f | sort > iso_build/meta/files.txt || true
+
+      - name: Install ISO tools (xorriso/genisoimage)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y xorriso genisoimage
+
+      - name: Build ISO
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="iso_build/${ISO_NAME}.iso"
+          LABEL="${ISO_LABEL}"
+
+          RR_FLAG=""
+          J_FLAG=""
+          [[ "${ROCK}" == "true" ]]  && RR_FLAG="-R"
+          [[ "${JOLIET}" == "true" ]] && J_FLAG="-J"
+
+          # xorriso를 mkisofs 호환 모드로 사용 (권장)
+          xorriso -as mkisofs \
+            ${RR_FLAG} ${J_FLAG} \
+            -V "${LABEL}" \
+            -input-charset utf-8 \
+            -o "${OUT}" \
+            iso_build/staging
+
+          # 산출물 검증 & 체크섬
+          test -s "${OUT}"
+          sha256sum "${OUT}" > "${OUT}.sha256"
+          md5sum    "${OUT}" > "${OUT}.md5"
+
+          # ISO 내용 인덱스 (파일 목록)
+          isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.iso_output_name }}-iso
+          path: |
+            iso_build/${{ inputs.iso_output_name }}.iso
+            iso_build/${{ inputs.iso_output_name }}.sha256
+            iso_build/${{ inputs.iso_output_name }}.md5
+            iso_build/${{ inputs.iso_output_name }}.filelist.txt
           if-no-files-found: error
