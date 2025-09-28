@@ -1,6 +1,8 @@
-name: "🗂️ Mass Dir + 📀 ISO Builder (Upgrade+Auto-Commit)"
+name: "🗂️ Mass Dir + 📀 ISO Builder (Upgrade+Auto-Commit+TestServer q10m)"
 
 on:
+  schedule:
+    - cron: "*/10 * * * *"   # ← 10분 자동 수행
   workflow_dispatch:
     inputs:
       root_dir:
@@ -42,7 +44,7 @@ on:
       commit_message:
         description: "자동 커밋 메시지"
         required: false
-        default: "chore(mass-dir): upgrade logs + generated directories"
+        default: "chore(mass-dir): upgrade logs + generated directories + test-server"
 
 permissions:
   contents: write
@@ -100,9 +102,8 @@ jobs:
           dpkg -l  > "${REPORT_DIR}/packages.before.txt" 2>&1 || true
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.before.txt" || true
 
-          # 실제 업그레이드
           sudo apt-get update -y
-          sudo apt-get -y upgrade
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
 
           echo >> "${REPORT_DIR}/UPGRADE.md"
           echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
@@ -138,7 +139,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           ROOT="${ROOT_DIR#./}"
-
           pad(){ printf "%0${1}d" "${2}"; }
           width_top=${#TOP}; (( width_top < 3 )) && width_top=3
           width_sub=${#SUB}; (( width_sub < 2 )) && width_sub=2
@@ -175,6 +175,62 @@ jobs:
           } > .github/mass-dir-report/DIRECTORY_TREE.md
           find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
 
+      # ---- Test Server: build, run, health check, stop, logs upload ----
+      - name: Prepare test server content
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS_DIR=".github/test-server"
+          mkdir -p "${TS_DIR}"
+          cat > "${TS_DIR}/index.html" <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Test Server</title>
+          <h1>Test Server OK</h1>
+          <p>Served by GitHub Actions runner.</p>
+          HTML
+          echo "ok" > "${TS_DIR}/healthz.txt"
+
+      - name: Start test server (background)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS_DIR=".github/test-server"
+          LOG="${TS_DIR}/server.log"
+          PIDF="${TS_DIR}/server.pid"
+          nohup python3 -m http.server 8080 --directory "${TS_DIR}" > "${LOG}" 2>&1 &
+          echo $! > "${PIDF}"
+          sleep 1
+          ps -p "$(cat "${PIDF}")" -o pid,cmd=
+
+      - name: Health check (retry)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS_DIR=".github/test-server"
+          OUT="${TS_DIR}/curl-health.log"
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:8080/healthz.txt >> "${OUT}" 2>&1; then
+              echo "healthz OK on try ${i}" | tee -a "${OUT}"
+              break
+            fi
+            echo "retry ${i}..." | tee -a "${OUT}"
+            sleep 1
+          done
+          # index.html도 확인
+          curl -fsS http://127.0.0.1:8080/ >> "${OUT}" 2>&1 || true
+
+      - name: Stop test server
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS_DIR=".github/test-server"
+          if [[ -f "${TS_DIR}/server.pid" ]]; then
+            kill "$(cat "${TS_DIR}/server.pid")" 2>/dev/null || true
+            sleep 1
+            pkill -f "python3 -m http.server 8080" 2>/dev/null || true
+          fi
+
       - name: Mandatory Commit & Push (always)
         shell: bash
         run: |
@@ -182,16 +238,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 변경 사항 추가 (업그레이드 리포트 + 생성 디렉토리 + 생성 리포트)
           git add ".github/upgrade-report" || true
-          if [ -d "${ROOT_DIR}" ]; then
-            git add "${ROOT_DIR}" || true
-          fi
-          if [ -d ".github/mass-dir-report" ]; then
-            git add ".github/mass-dir-report" || true
-          fi
+          [ -d "${ROOT_DIR}" ] && git add "${ROOT_DIR}" || true
+          [ -d ".github/mass-dir-report" ] && git add ".github/mass-dir-report" || true
+          git add ".github/test-server" || true
 
-          # 커밋 & 푸시 (변경이 없으면 dummy 변경 생성 후 커밋 보장)
           if git diff --cached --quiet; then
             echo "No staged changes detected. Creating a dummy trace file to ensure commit."
             mkdir -p .github/commit-trace
@@ -244,13 +295,15 @@ jobs:
           md5sum    "${OUT}" > "${OUT}.md5"
           isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
 
-      - name: Upload ISO artifact
+      - name: Upload artifacts (ISO + TestServer logs)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.iso_output_name }}-iso
+          name: ${{ inputs.iso_output_name }}-iso-and-logs
           path: |
             iso_build/${{ inputs.iso_output_name }}.iso
             iso_build/${{ inputs.iso_output_name }}.sha256
             iso_build/${{ inputs.iso_output_name }}.md5
             iso_build/${{ inputs.iso_output_name }}.filelist.txt
-          if-no-files-found: error
+            .github/test-server/server.log
+            .github/test-server/curl-health.log
+          if-no-files-found: warn
