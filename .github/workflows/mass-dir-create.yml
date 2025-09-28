@@ -1,8 +1,8 @@
-name: "🗂️ Mass Dir + 📀 ISO Builder (Upgrade+Auto-Commit+TestServer q10m)"
+name: "🗂️ Mass Dir + 📀 ISO Builder (q10m + Upgrade+Auto-Commit+TestServer + dpkg-clean)"
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # ← 10분 자동 수행
+    - cron: "*/10 * * * *"   # 10분마다 자동 수행
   workflow_dispatch:
     inputs:
       root_dir:
@@ -44,7 +44,7 @@ on:
       commit_message:
         description: "자동 커밋 메시지"
         required: false
-        default: "chore(mass-dir): upgrade logs + generated directories + test-server"
+        default: "chore(mass-dir): dpkg-clean + upgrade logs + generated dirs + test-server"
 
 permissions:
   contents: write
@@ -82,8 +82,47 @@ jobs:
           echo "rock=$( has_flag rock && echo true || echo false )"       >> "$GITHUB_OUTPUT"
           echo "joliet=$( has_flag joliet && echo true || echo false )"   >> "$GITHUB_OUTPUT"
 
-      - name: System upgrade & report (mandatory)
+      # ─────────────────────────────────────────────────────────────────────
+      # dpkg 경고 예방: 문제 디렉토리 사전 정리 (비어있지 않아도 제거)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Pre-clean dpkg leftover dirs (prevent warnings)
         shell: bash
+        run: |
+          set -Eeuo pipefail
+          CLEAN_LOG=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)/dpkg-preclean.log"
+          mkdir -p "$(dirname "${CLEAN_LOG}")"
+          touch "${CLEAN_LOG}"
+
+          clean_dir(){
+            local d="$1"
+            if [ -d "$d" ]; then
+              echo "[preclean] removing: $d" | tee -a "${CLEAN_LOG}"
+              # 소유권/퍼미션 보정 후 강제 삭제
+              sudo chmod -R u+rwX "$d" || true
+              sudo chattr -R -i "$d" 2>/dev/null || true
+              sudo rm -rf "$d" || true
+            fi
+          }
+
+          # 알려진 경고 유발 경로들
+          clean_dir "/etc/firefox"
+          clean_dir "/etc/apport/native-origins.d"
+          clean_dir "/etc/apport/blacklist.d"
+
+          # 상위 디렉토리의 빈 디렉토리도 한번 정리
+          for parent in /etc/apport; do
+            if [ -d "$parent" ]; then
+              sudo find "$parent" -type d -empty -print -exec rmdir {} \; 2>/dev/null | tee -a "${CLEAN_LOG}" || true
+            fi
+          done
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 시스템 업그레이드 (강제) + 리포트
+      # ─────────────────────────────────────────────────────────────────────
+      - name: System upgrade & report (mandatory, quiet dpkg warnings)
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -Eeuo pipefail
           REPORT_DIR=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -103,7 +142,15 @@ jobs:
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.before.txt" || true
 
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+          # dpkg 메시지 최대한 억제: conf 처리 기본/신규 우선
+          sudo apt-get -y \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confnew" \
+            upgrade | tee "${REPORT_DIR}/upgrade.raw.log"
+
+          # 사후 정리
+          sudo apt-get -y autoremove --purge || true
+          sudo apt-get -y clean || true
 
           echo >> "${REPORT_DIR}/UPGRADE.md"
           echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
@@ -118,6 +165,38 @@ jobs:
             ls -1 "${REPORT_DIR}"
           } >> "${REPORT_DIR}/UPGRADE.md"
 
+      # ─────────────────────────────────────────────────────────────────────
+      # 사후 검증: 경고 문자열이 로그에 있으면 추가 정리 + 상태 복구
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Post-verify dpkg warnings and re-clean if needed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 최근 리포트 디렉토리 추적
+          REPORT_BASE=".github/upgrade-report"
+          LAST_REPORT="$(ls -1 "${REPORT_BASE}" | sort | tail -n1)"
+          LOGF="${REPORT_BASE}/${LAST_REPORT}/upgrade.raw.log"
+          CLEAN_AGAIN_LOG="${REPORT_BASE}/${LAST_REPORT}/dpkg-postclean.log"
+          touch "${CLEAN_AGAIN_LOG}"
+
+          if grep -q "unable to delete old directory '/etc/firefox'" "${LOGF}" 2>/dev/null || \
+             grep -q "unable to delete old directory '/etc/apport/native-origins.d'" "${LOGF}" 2>/dev/null || \
+             grep -q "unable to delete old directory '/etc/apport/blacklist.d'" "${LOGF}" 2>/dev/null ; then
+            echo "[postclean] re-clean triggered" | tee -a "${CLEAN_AGAIN_LOG}"
+            sudo rm -rf /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d || true
+            for parent in /etc/apport; do
+              [ -d "$parent" ] && sudo find "$parent" -type d -empty -exec rmdir {} \; 2>/dev/null || true
+            done
+            # dpkg pending 상태 정리
+            sudo dpkg --configure -a || true
+            sudo apt-get -f install -y || true
+          else
+            echo "[postclean] no dpkg directory warnings found" | tee -a "${CLEAN_AGAIN_LOG}"
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # (옵션) 대량 디렉토리 생성
+      # ─────────────────────────────────────────────────────────────────────
       - name: Validate inputs & safety (only when gen)
         if: ${{ steps.flags.outputs.gen == 'true' }}
         shell: bash
@@ -175,7 +254,9 @@ jobs:
           } > .github/mass-dir-report/DIRECTORY_TREE.md
           find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
 
-      # ---- Test Server: build, run, health check, stop, logs upload ----
+      # ─────────────────────────────────────────────────────────────────────
+      # 테스트 서버: run → health check → stop
+      # ─────────────────────────────────────────────────────────────────────
       - name: Prepare test server content
         shell: bash
         run: |
@@ -183,11 +264,8 @@ jobs:
           TS_DIR=".github/test-server"
           mkdir -p "${TS_DIR}"
           cat > "${TS_DIR}/index.html" <<'HTML'
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>Test Server</title>
-          <h1>Test Server OK</h1>
-          <p>Served by GitHub Actions runner.</p>
+          <!doctype html><meta charset="utf-8"><title>Test Server</title>
+          <h1>Test Server OK</h1><p>Served by GitHub Actions runner.</p>
           HTML
           echo "ok" > "${TS_DIR}/healthz.txt"
 
@@ -217,7 +295,6 @@ jobs:
             echo "retry ${i}..." | tee -a "${OUT}"
             sleep 1
           done
-          # index.html도 확인
           curl -fsS http://127.0.0.1:8080/ >> "${OUT}" 2>&1 || true
 
       - name: Stop test server
@@ -231,6 +308,9 @@ jobs:
             pkill -f "python3 -m http.server 8080" 2>/dev/null || true
           fi
 
+      # ─────────────────────────────────────────────────────────────────────
+      # 커밋/푸시 (항상)
+      # ─────────────────────────────────────────────────────────────────────
       - name: Mandatory Commit & Push (always)
         shell: bash
         run: |
@@ -253,6 +333,9 @@ jobs:
           git commit -m "${{ inputs.commit_message }}"
           git push
 
+      # ─────────────────────────────────────────────────────────────────────
+      # ISO 빌드
+      # ─────────────────────────────────────────────────────────────────────
       - name: Validate source dir & prepare staging (for ISO)
         shell: bash
         run: |
