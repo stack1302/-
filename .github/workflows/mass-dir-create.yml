@@ -1,8 +1,8 @@
-name: "🗂️ Mass Dir + 📀 ISO Builder (q10m + Upgrade+Auto-Commit+TestServer + dpkg-clean)"
+name: "🗂️ Mass Dir + 📀 ISO Builder + 📦 Packages + 🚀 Release (q10m)"
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # 10분마다 자동 수행
+    - cron: "*/10 * * * *"     # 10분마다 수행
   workflow_dispatch:
     inputs:
       root_dir:
@@ -26,9 +26,9 @@ on:
         required: true
         default: "sub-"
       options:
-        description: "CSV 플래그: gen,placeholders,rock,joliet"
+        description: "CSV 플래그: gen,placeholders,rock,joliet,release,pkgzip,pkgtar"
         required: true
-        default: "gen,placeholders,rock,joliet"
+        default: "gen,placeholders,rock,joliet,release,pkgzip,pkgtar"
       iso_source_dir:
         description: "ISO로 묶을 소스 디렉토리"
         required: true
@@ -44,10 +44,10 @@ on:
       commit_message:
         description: "자동 커밋 메시지"
         required: false
-        default: "chore(mass-dir): dpkg-clean + upgrade logs + generated dirs + test-server"
+        default: "chore(mass-dir): dpkg-clean + upgrade logs + generated dirs + test-server + packages + release"
 
 permissions:
-  contents: write
+  contents: write    # 커밋/푸시 & 릴리즈 업로드에 필요
 
 concurrency:
   group: mass-dir-iso-${{ github.ref }}
@@ -77,49 +77,30 @@ jobs:
         run: |
           set -Eeuo pipefail
           has_flag(){ [[ ",${OPTIONS}," == *",$1,"* ]]; }
-          echo "gen=$( has_flag gen && echo true || echo false )"         >> "$GITHUB_OUTPUT"
+          echo "gen=$( has_flag gen && echo true || echo false )"           >> "$GITHUB_OUTPUT"
           echo "placeholders=$( has_flag placeholders && echo true || echo false )" >> "$GITHUB_OUTPUT"
-          echo "rock=$( has_flag rock && echo true || echo false )"       >> "$GITHUB_OUTPUT"
-          echo "joliet=$( has_flag joliet && echo true || echo false )"   >> "$GITHUB_OUTPUT"
+          echo "rock=$( has_flag rock && echo true || echo false )"         >> "$GITHUB_OUTPUT"
+          echo "joliet=$( has_flag joliet && echo true || echo false )"     >> "$GITHUB_OUTPUT"
+          echo "release=$( has_flag release && echo true || echo false )"   >> "$GITHUB_OUTPUT"
+          echo "pkgzip=$( has_flag pkgzip && echo true || echo false )"     >> "$GITHUB_OUTPUT"
+          echo "pkgtar=$( has_flag pkgtar && echo true || echo false )"     >> "$GITHUB_OUTPUT"
 
-      # ─────────────────────────────────────────────────────────────────────
-      # dpkg 경고 예방: 문제 디렉토리 사전 정리 (비어있지 않아도 제거)
-      # ─────────────────────────────────────────────────────────────────────
+      # ── dpkg 경고 예방 사전 정리 ─────────────────────────────────────
       - name: Pre-clean dpkg leftover dirs (prevent warnings)
         shell: bash
         run: |
           set -Eeuo pipefail
-          CLEAN_LOG=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)/dpkg-preclean.log"
-          mkdir -p "$(dirname "${CLEAN_LOG}")"
-          touch "${CLEAN_LOG}"
-
-          clean_dir(){
-            local d="$1"
-            if [ -d "$d" ]; then
-              echo "[preclean] removing: $d" | tee -a "${CLEAN_LOG}"
-              # 소유권/퍼미션 보정 후 강제 삭제
-              sudo chmod -R u+rwX "$d" || true
-              sudo chattr -R -i "$d" 2>/dev/null || true
-              sudo rm -rf "$d" || true
-            fi
-          }
-
-          # 알려진 경고 유발 경로들
+          LOG_DIR=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "${LOG_DIR}"
+          CLEAN_LOG="${LOG_DIR}/dpkg-preclean.log"; : > "${CLEAN_LOG}"
+          clean_dir(){ d="$1"; [ -d "$d" ] || return 0; echo "[preclean] $d" | tee -a "${CLEAN_LOG}"; sudo chmod -R u+rwX "$d" || true; sudo chattr -R -i "$d" 2>/dev/null || true; sudo rm -rf "$d" || true; }
           clean_dir "/etc/firefox"
           clean_dir "/etc/apport/native-origins.d"
           clean_dir "/etc/apport/blacklist.d"
+          [ -d /etc/apport ] && sudo find /etc/apport -type d -empty -exec rmdir {} \; 2>/dev/null | tee -a "${CLEAN_LOG}" || true
 
-          # 상위 디렉토리의 빈 디렉토리도 한번 정리
-          for parent in /etc/apport; do
-            if [ -d "$parent" ]; then
-              sudo find "$parent" -type d -empty -print -exec rmdir {} \; 2>/dev/null | tee -a "${CLEAN_LOG}" || true
-            fi
-          done
-
-      # ─────────────────────────────────────────────────────────────────────
-      # 시스템 업그레이드 (강제) + 리포트
-      # ─────────────────────────────────────────────────────────────────────
-      - name: System upgrade & report (mandatory, quiet dpkg warnings)
+      # ── 시스템 업그레이드(강제) ─────────────────────────────────────
+      - name: System upgrade & report (mandatory)
         shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -127,7 +108,6 @@ jobs:
           set -Eeuo pipefail
           REPORT_DIR=".github/upgrade-report/$(date -u +%Y%m%dT%H%M%SZ)"
           mkdir -p "${REPORT_DIR}"
-
           {
             echo "# System Upgrade Report"
             echo "- Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -136,19 +116,12 @@ jobs:
             echo
             echo "## Upgradable (before)"
           } > "${REPORT_DIR}/UPGRADE.md"
-
           apt -v   > "${REPORT_DIR}/apt-version.txt" 2>&1 || true
           dpkg -l  > "${REPORT_DIR}/packages.before.txt" 2>&1 || true
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.before.txt" || true
 
           sudo apt-get update -y
-          # dpkg 메시지 최대한 억제: conf 처리 기본/신규 우선
-          sudo apt-get -y \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confnew" \
-            upgrade | tee "${REPORT_DIR}/upgrade.raw.log"
-
-          # 사후 정리
+          sudo apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew" upgrade | tee "${REPORT_DIR}/upgrade.raw.log"
           sudo apt-get -y autoremove --purge || true
           sudo apt-get -y clean || true
 
@@ -156,47 +129,30 @@ jobs:
           echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.after.txt" || true
           dpkg -l  > "${REPORT_DIR}/packages.after.txt" 2>&1 || true
-
           {
             echo
             echo "### Summary"
             echo "- Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "- Files:"
-            ls -1 "${REPORT_DIR}"
+            echo "- Files:"; ls -1 "${REPORT_DIR}"
           } >> "${REPORT_DIR}/UPGRADE.md"
 
-      # ─────────────────────────────────────────────────────────────────────
-      # 사후 검증: 경고 문자열이 로그에 있으면 추가 정리 + 상태 복구
-      # ─────────────────────────────────────────────────────────────────────
       - name: Post-verify dpkg warnings and re-clean if needed
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 최근 리포트 디렉토리 추적
-          REPORT_BASE=".github/upgrade-report"
-          LAST_REPORT="$(ls -1 "${REPORT_BASE}" | sort | tail -n1)"
-          LOGF="${REPORT_BASE}/${LAST_REPORT}/upgrade.raw.log"
-          CLEAN_AGAIN_LOG="${REPORT_BASE}/${LAST_REPORT}/dpkg-postclean.log"
-          touch "${CLEAN_AGAIN_LOG}"
-
-          if grep -q "unable to delete old directory '/etc/firefox'" "${LOGF}" 2>/dev/null || \
-             grep -q "unable to delete old directory '/etc/apport/native-origins.d'" "${LOGF}" 2>/dev/null || \
-             grep -q "unable to delete old directory '/etc/apport/blacklist.d'" "${LOGF}" 2>/dev/null ; then
-            echo "[postclean] re-clean triggered" | tee -a "${CLEAN_AGAIN_LOG}"
+          BASE=".github/upgrade-report"; LAST="$(ls -1 "${BASE}" | sort | tail -n1)"
+          LOGF="${BASE}/${LAST}/upgrade.raw.log"; CLEAN="${BASE}/${LAST}/dpkg-postclean.log"; : > "${CLEAN}"
+          if grep -Eq "unable to delete old directory '/etc/(firefox|apport/[^']+)'" "${LOGF}" 2>/dev/null; then
+            echo "[postclean] re-clean" | tee -a "${CLEAN}"
             sudo rm -rf /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d || true
-            for parent in /etc/apport; do
-              [ -d "$parent" ] && sudo find "$parent" -type d -empty -exec rmdir {} \; 2>/dev/null || true
-            done
-            # dpkg pending 상태 정리
+            [ -d /etc/apport ] && sudo find /etc/apport -type d -empty -exec rmdir {} \; 2>/dev/null || true
             sudo dpkg --configure -a || true
             sudo apt-get -f install -y || true
           else
-            echo "[postclean] no dpkg directory warnings found" | tee -a "${CLEAN_AGAIN_LOG}"
+            echo "[postclean] no dpkg directory warnings" | tee -a "${CLEAN}"
           fi
 
-      # ─────────────────────────────────────────────────────────────────────
-      # (옵션) 대량 디렉토리 생성
-      # ─────────────────────────────────────────────────────────────────────
+      # ── (옵션) 대량 디렉토리 생성 ──────────────────────────────────
       - name: Validate inputs & safety (only when gen)
         if: ${{ steps.flags.outputs.gen == 'true' }}
         shell: bash
@@ -204,10 +160,8 @@ jobs:
           set -Eeuo pipefail
           [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수여야 합니다"; exit 1; }
           [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수여야 합니다"; exit 1; }
-          MAX_TOP=20000
-          (( TOP <= MAX_TOP )) || { echo "top_count=${TOP} > ${MAX_TOP}"; exit 1; }
-          SAFE_ROOT="${ROOT_DIR#./}"
-          [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir가 비었습니다."; exit 1; }
+          (( TOP <= 20000 )) || { echo "top_count 과다"; exit 1; }
+          SAFE_ROOT="${ROOT_DIR#./}"; [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir 비었음"; exit 1; }
           mkdir -p "${SAFE_ROOT}"
 
       - name: Create mass directories (optional by flag)
@@ -221,7 +175,6 @@ jobs:
           pad(){ printf "%0${1}d" "${2}"; }
           width_top=${#TOP}; (( width_top < 3 )) && width_top=3
           width_sub=${#SUB}; (( width_sub < 2 )) && width_sub=2
-
           for i in $(seq 1 "${TOP}"); do
             idx_top=$(pad "${width_top}" "${i}")
             D="${ROOT}/${PREF}${idx_top}"
@@ -241,59 +194,40 @@ jobs:
               done
             fi
           done
-
           mkdir -p .github/mass-dir-report
           {
             echo "# Directory Listing"
             echo "- Root: ${ROOT}"
             echo "- Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-            echo
-            echo '```'
-            find "${ROOT}" -type d | sort
-            echo '```'
+            echo; echo '```'; find "${ROOT}" -type d | sort; echo '```'
           } > .github/mass-dir-report/DIRECTORY_TREE.md
           find "${ROOT}" -mindepth 1 -maxdepth 1 -type d | sort > .github/mass-dir-report/top_dirs.txt
 
-      # ─────────────────────────────────────────────────────────────────────
-      # 테스트 서버: run → health check → stop
-      # ─────────────────────────────────────────────────────────────────────
+      # ── 테스트 서버 ───────────────────────────────────────────────
       - name: Prepare test server content
         shell: bash
         run: |
           set -Eeuo pipefail
-          TS_DIR=".github/test-server"
-          mkdir -p "${TS_DIR}"
-          cat > "${TS_DIR}/index.html" <<'HTML'
-          <!doctype html><meta charset="utf-8"><title>Test Server</title>
-          <h1>Test Server OK</h1><p>Served by GitHub Actions runner.</p>
-          HTML
-          echo "ok" > "${TS_DIR}/healthz.txt"
+          TS=".github/test-server"; mkdir -p "${TS}"
+          printf '<!doctype html><meta charset="utf-8"><title>Test Server</title><h1>Test Server OK</h1><p>Served by GitHub Actions runner.</p>' > "${TS}/index.html"
+          echo "ok" > "${TS}/healthz.txt"
 
       - name: Start test server (background)
         shell: bash
         run: |
           set -Eeuo pipefail
-          TS_DIR=".github/test-server"
-          LOG="${TS_DIR}/server.log"
-          PIDF="${TS_DIR}/server.pid"
-          nohup python3 -m http.server 8080 --directory "${TS_DIR}" > "${LOG}" 2>&1 &
-          echo $! > "${PIDF}"
-          sleep 1
-          ps -p "$(cat "${PIDF}")" -o pid,cmd=
+          TS=".github/test-server"; LOG="${TS}/server.log"; PIDF="${TS}/server.pid"
+          nohup python3 -m http.server 8080 --directory "${TS}" > "${LOG}" 2>&1 & echo $! > "${PIDF}"
+          sleep 1; ps -p "$(cat "${PIDF}")" -o pid,cmd=
 
       - name: Health check (retry)
         shell: bash
         run: |
           set -Eeuo pipefail
-          TS_DIR=".github/test-server"
-          OUT="${TS_DIR}/curl-health.log"
+          TS=".github/test-server"; OUT="${TS}/curl-health.log"
           for i in $(seq 1 10); do
-            if curl -fsS http://127.0.0.1:8080/healthz.txt >> "${OUT}" 2>&1; then
-              echo "healthz OK on try ${i}" | tee -a "${OUT}"
-              break
-            fi
-            echo "retry ${i}..." | tee -a "${OUT}"
-            sleep 1
+            if curl -fsS http://127.0.0.1:8080/healthz.txt >> "${OUT}" 2>&1; then echo "healthz OK try ${i}" | tee -a "${OUT}"; break; fi
+            echo "retry ${i}..." | tee -a "${OUT}"; sleep 1
           done
           curl -fsS http://127.0.0.1:8080/ >> "${OUT}" 2>&1 || true
 
@@ -301,50 +235,37 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          TS_DIR=".github/test-server"
-          if [[ -f "${TS_DIR}/server.pid" ]]; then
-            kill "$(cat "${TS_DIR}/server.pid")" 2>/dev/null || true
-            sleep 1
-            pkill -f "python3 -m http.server 8080" 2>/dev/null || true
-          fi
+          TS=".github/test-server"
+          [ -f "${TS}/server.pid" ] && kill "$(cat "${TS}/server.pid")" 2>/dev/null || true
+          sleep 1; pkill -f "python3 -m http.server 8080" 2>/dev/null || true
 
-      # ─────────────────────────────────────────────────────────────────────
-      # 커밋/푸시 (항상)
-      # ─────────────────────────────────────────────────────────────────────
+      # ── 커밋/푸시(항상) ──────────────────────────────────────────
       - name: Mandatory Commit & Push (always)
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add ".github/upgrade-report" || true
           [ -d "${ROOT_DIR}" ] && git add "${ROOT_DIR}" || true
           [ -d ".github/mass-dir-report" ] && git add ".github/mass-dir-report" || true
           git add ".github/test-server" || true
-
           if git diff --cached --quiet; then
-            echo "No staged changes detected. Creating a dummy trace file to ensure commit."
             mkdir -p .github/commit-trace
             date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/commit-trace/last-run.txt
             git add .github/commit-trace/last-run.txt
           fi
-
           git commit -m "${{ inputs.commit_message }}"
           git push
 
-      # ─────────────────────────────────────────────────────────────────────
-      # ISO 빌드
-      # ─────────────────────────────────────────────────────────────────────
+      # ── ISO 빌드 ─────────────────────────────────────────────────
       - name: Validate source dir & prepare staging (for ISO)
         shell: bash
         run: |
           set -Eeuo pipefail
-          SRC="${SRC_DIR#./}"
-          [[ -d "${SRC}" ]] || { echo "소스 디렉토리(${SRC_DIR})가 존재하지 않습니다."; exit 1; }
-          mkdir -p iso_build/staging
+          SRC="${SRC_DIR#./}"; [ -d "${SRC}" ] || { echo "소스 디렉토리(${SRC_DIR}) 없음"; exit 1; }
+          mkdir -p iso_build/staging iso_build/meta packages
           rsync -a --delete "${SRC}/" "iso_build/staging/${SRC}/"
-          mkdir -p iso_build/meta
           find "iso_build/staging/${SRC}" -mindepth 1 -maxdepth 1 -type d | sort > iso_build/meta/top_dirs.txt || true
           find "iso_build/staging/${SRC}" -type f | sort > iso_build/meta/files.txt || true
 
@@ -353,7 +274,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y xorriso genisoimage
+          sudo apt-get install -y xorriso genisoimage zip
 
       - name: Build ISO
         shell: bash
@@ -362,31 +283,79 @@ jobs:
           JOLIET: ${{ steps.flags.outputs.joliet }}
         run: |
           set -Eeuo pipefail
-          OUT="iso_build/${ISO_NAME}.iso"
-          LABEL="${ISO_LABEL}"
+          OUT="iso_build/${ISO_NAME}.iso"; LABEL="${ISO_LABEL}"
           RR_FLAG=""; J_FLAG=""
           [[ "${ROCK}" == "true"  ]] && RR_FLAG="-R"
           [[ "${JOLIET}" == "true" ]] && J_FLAG="-J"
-          xorriso -as mkisofs \
-            ${RR_FLAG} ${J_FLAG} \
-            -V "${LABEL}" \
-            -input-charset utf-8 \
-            -o "${OUT}" \
-            iso_build/staging
+          xorriso -as mkisofs ${RR_FLAG} ${J_FLAG} -V "${LABEL}" -input-charset utf-8 -o "${OUT}" iso_build/staging
           test -s "${OUT}"
           sha256sum "${OUT}" > "${OUT}.sha256"
           md5sum    "${OUT}" > "${OUT}.md5"
           isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
 
-      - name: Upload artifacts (ISO + TestServer logs)
+      # ── 패키지(Zip/Tar.gz) 생성 ──────────────────────────────────
+      - name: Package source dir (zip/tar.gz) as requested
+        shell: bash
+        env:
+          PKGZIP: ${{ steps.flags.outputs.pkgzip }}
+          PKGTAR: ${{ steps.flags.outputs.pkgtar }}
+        run: |
+          set -Eeuo pipefail
+          SRC="${SRC_DIR#./}"
+          TS=$(date -u +%Y%m%dT%H%M%SZ)
+          # 소스 디렉토리 패키징
+          if [[ "${PKGZIP}" == "true" ]]; then
+            (cd iso_build/staging && zip -r "../../packages/${SRC}-src-${TS}.zip" "${SRC}")
+            sha256sum "packages/${SRC}-src-${TS}.zip" > "packages/${SRC}-src-${TS}.zip.sha256"
+          fi
+          if [[ "${PKGTAR}" == "true" ]]; then
+            (cd iso_build/staging && tar -czf "../../packages/${SRC}-src-${TS}.tar.gz" "${SRC}")
+            sha256sum "packages/${SRC}-src-${TS}.tar.gz" > "packages/${SRC}-src-${TS}.tar.gz.sha256"
+          fi
+          # ISO 자체도 zip으로 감싸기(선택적으로 유용)
+          if [[ "${PKGZIP}" == "true" ]]; then
+            zip -j "packages/${ISO_NAME}-${TS}.iso.zip" "iso_build/${ISO_NAME}.iso"
+            sha256sum "packages/${ISO_NAME}-${TS}.iso.zip" > "packages/${ISO_NAME}-${TS}.iso.zip.sha256"
+          fi
+
+      - name: Upload artifacts (ISO + Packages + Logs)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.iso_output_name }}-iso-and-logs
+          name: ${{ inputs.iso_output_name }}-iso-packages-and-logs
           path: |
             iso_build/${{ inputs.iso_output_name }}.iso
             iso_build/${{ inputs.iso_output_name }}.sha256
             iso_build/${{ inputs.iso_output_name }}.md5
             iso_build/${{ inputs.iso_output_name }}.filelist.txt
+            packages/*
             .github/test-server/server.log
             .github/test-server/curl-health.log
           if-no-files-found: warn
+
+      # ── 릴리즈 생성/업로드 (옵션 release) ─────────────────────────
+      - name: Create GitHub Release (tagged) and upload assets
+        if: ${{ steps.flags.outputs.release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_id }}-${{ github.run_number }}-$(date +%Y%m%d%H%M%S)
+          name: "Auto Release — ${{ inputs.iso_output_name }} @ ${{ github.run_number }}"
+          body: |
+            ## Automated Release
+            - Source: `${{ inputs.iso_source_dir }}`
+            - ISO Label: `${{ inputs.iso_label }}`
+            - Options: `${{ inputs.options }}`
+            - Run: `${{ github.run_id }} / ${{ github.run_number }}`
+            - Time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+            ### Included Artifacts
+            - ISO + checksums + filelist
+            - Packages (zip/tar.gz as requested)
+            - Test server logs
+          files: |
+            iso_build/${{ inputs.iso_output_name }}.iso
+            iso_build/${{ inputs.iso_output_name }}.sha256
+            iso_build/${{ inputs.iso_output_name }}.md5
+            iso_build/${{ inputs.iso_output_name }}.filelist.txt
+            packages/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
