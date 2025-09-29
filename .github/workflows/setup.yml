@@ -1,0 +1,199 @@
+name: "Spring Boot + Docker Image + Curl Downloads (All-in-One)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      java_version:
+        description: "JDK 버전"
+        type: choice
+        required: true
+        default: "21"
+        options: ["17", "21"]
+      maven_version:
+        description: "Maven 버전 (예: 3.9.9)"
+        required: true
+        default: "3.9.9"
+      image_name:
+        description: "이미지 이름(태그는 자동 생성)"
+        required: true
+        default: "app-image"
+      create_release:
+        description: "GitHub Release 생성 여부"
+        type: boolean
+        required: true
+        default: true
+      skip_tests:
+        description: "Maven 테스트 생략"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: write   # release 생성/업로드
+  actions: read
+  checks: read
+
+env:
+  TZ: Asia/Seoul
+
+jobs:
+  build-package-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: ☑️ Checkout
+      - uses: actions/checkout@v4
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+
+      - name: 🧰 Install Maven via curl
+        id: maven
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MV=${{ inputs.maven_version }}
+          curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MV}/binaries/apache-maven-${MV}-bin.tar.gz" -o maven.tgz
+          sudo tar -C /opt -xzf maven.tgz
+          sudo ln -sf "/opt/apache-maven-${MV}/bin/mvn" /usr/local/bin/mvn
+          mvn -v
+
+      - name: 🧾 Ensure Dockerfile (auto-generate if missing)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile not found. Generating a safe multi-stage Dockerfile..."
+            cat > Dockerfile <<'DOCKER'
+            # ---- build stage ----
+            FROM eclipse-temurin:21-jdk AS build
+            WORKDIR /workspace
+            COPY . .
+            # Expect target/*.jar already built by Maven step
+
+            # ---- run stage ----
+            FROM gcr.io/distroless/java21-debian12@sha256:9fd016b7c6cf3e8c04d0b8d8587c76d7d8a91f06442bfc8b8ae4d2908b2d29a3
+            WORKDIR /app
+            # The JAR will be copied in the workflow after mvn package
+            COPY target/*.jar /app/app.jar
+            EXPOSE 8080
+            USER 65532:65532
+            ENTRYPOINT ["java","-jar","/app/app.jar"]
+            DOCKER
+          fi
+
+      - name: 🧱 Maven Build (package)
+        id: mvn
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ inputs.skip_tests }}" == "true" ]]; then
+            mvn -B -DskipTests package
+          else
+            mvn -B package
+          fi
+          # Pick the main runnable jar (exclude *-sources, *-javadoc)
+          JAR_PATH="$(ls -1 target/*.jar | grep -Ev 'sources|javadoc' | head -n1)"
+          if [ -z "$JAR_PATH" ]; then
+            echo "No JAR produced in target/"; exit 1
+          fi
+          echo "jar_path=$JAR_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: 🐳 Build Docker image
+        id: dimg
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IMG="${{ inputs.image_name }}"
+          TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          FULL="${IMG}:${TAG}"
+          echo "Image tag: $FULL"
+
+          # Buildx is preinstalled on ubuntu-latest runners
+          docker buildx build --load -t "$FULL" .
+
+          echo "full_image=$FULL" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 📦 Export image (docker save + gzip) & checksums
+        id: saveimg
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT_DIR="dist"
+          mkdir -p "$OUT_DIR"
+          IMG="${{ steps.dimg.outputs.full_image }}"
+          TAR="${OUT_DIR}/$(echo "$IMG" | tr '/:' '__').tar"
+          TGZ="${TAR}.gz"
+
+          docker save "$IMG" -o "$TAR"
+          gzip -9 "$TAR"
+
+          (cd "$OUT_DIR" && sha256sum "$(basename "$TGZ")" > "$(basename "$TGZ").sha256")
+          (cd "$OUT_DIR" && md5sum    "$(basename "$TGZ")" > "$(basename "$TGZ").md5")
+
+          # Also checksum the JAR
+          JAR="${{ steps.mvn.outputs.jar_path }}"
+          cp "$JAR" "$OUT_DIR/"
+          (cd "$OUT_DIR" && sha256sum "$(basename "$JAR")" > "$(basename "$JAR").sha256")
+          (cd "$OUT_DIR" && md5sum    "$(basename "$JAR")" > "$(basename "$JAR").md5")
+
+          echo "tar_gz=$TGZ" >> "$GITHUB_OUTPUT"
+          echo "jar_file=$OUT_DIR/$(basename "$JAR")" >> "$GITHUB_OUTPUT"
+
+      - name: ⬆️ Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: springboot-build-and-image
+          path: |
+            dist/**
+
+      - name: 🏷️ Create GitHub Release & Upload assets
+        if: ${{ inputs.create_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_id }}-${{ github.run_attempt }}
+          name: "Build ${{ github.run_id }}-${{ github.run_attempt }}"
+          body: |
+            - JDK: ${{ inputs.java_version }}
+            - Maven: ${{ inputs.maven_version }}
+            - Image: ${{ steps.dimg.outputs.full_image }}
+            - Jar: ${{ steps.mvn.outputs.jar_path }}
+          files: |
+            dist/*.jar
+            dist/*.jar.sha256
+            dist/*.jar.md5
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.md5
+
+      - name: 📥 Print curl download commands
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OWNER="${GITHUB_REPOSITORY%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          JAR_FILE="$(basename "${{ steps.saveimg.outputs.jar_file }}")"
+          IMG_FILE="$(basename "${{ steps.saveimg.outputs.tar_gz }}")"
+
+          echo ""
+          echo "==== CURL DOWNLOAD EXAMPLES (Release enabled) ===="
+          echo "# JAR:"
+          echo "curl -L -o ${JAR_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}"
+          echo "curl -L -o ${JAR_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}.sha256"
+          echo "sha256sum -c ${JAR_FILE}.sha256"
+          echo ""
+          echo "# Docker image tar.gz:"
+          echo "curl -L -o ${IMG_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}"
+          echo "curl -L -o ${IMG_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}.sha256"
+          echo "sha256sum -c ${IMG_FILE}.sha256"
+          echo ""
+          echo "# Load image into Docker:"
+          echo "gunzip -c ${IMG_FILE} | docker load"
+          echo ""
