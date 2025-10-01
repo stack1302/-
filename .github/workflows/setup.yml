@@ -1,4 +1,4 @@
-name: "Spring Boot + Docker Image + Curl (ALL-ECHO, no helper file)"
+name: "Spring Boot + Docker Image + Curl (ALL-ECHO, remote Dockerfile)"
 
 on:
   workflow_dispatch:
@@ -28,7 +28,19 @@ on:
         required: true
         default: true
       dockerfile_url:
-        description: "Dockerfile RAW URL (없으면 레포 루트의 Dockerfile 사용)"
+        description: "Dockerfile RAW URL (반드시 접근 가능한 정식 주소)"
+        required: true
+        default: "https://raw.githubusercontent.com/your-org/your-repo/main/Dockerfile"
+      dockerfile_auth_header:
+        description: "(선택) 인증 헤더. 예: Authorization: Bearer ${{ secrets.MY_TOKEN }}"
+        required: false
+        default: ""
+      dockerfile_extra_curl_flags:
+        description: "(선택) 추가 curl 플래그. 예: --proto '=https' --tlsv1.2"
+        required: false
+        default: ""
+      dockerfile_sha256:
+        description: "(선택) Dockerfile 기대 SHA256 (무결성 검증용)"
         required: false
         default: ""
 
@@ -54,12 +66,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ─────────────────────────────────────────────────────────
+      # 공통: 각 스텝에 경량 run_cmd 내장 (모든 실행 전 echo 출력)
+      # ─────────────────────────────────────────────────────────
       - name: "🧭 Env & runner summary"
         run: |
           set -Eeuo pipefail
           mkdir -p "$LOG_DIR"
           export LOG_FILE="$LOG_DIR/01_env_summary.log"
-          # ── echo+실행 미니 헬퍼(스텝 로컬) ──
           run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           echo "▶ Environment summary" | tee -a "$LOG_FILE"
           run_cmd "uname -a"
@@ -81,21 +95,50 @@ jobs:
           run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           run_cmd "java -version || true"
 
-      - name: "🧾 Ensure Dockerfile (curl-only when creating)"
+      # ─────────────────────────────────────────────────────────
+      # Dockerfile: 정식 URL에서 curl로 다운로드 (+옵션: 헤더/플래그/SHA256 검증)
+      # ─────────────────────────────────────────────────────────
+      - name: "🧾 Fetch Dockerfile from remote (curl-only)"
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/03_dockerfile.log"
           run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
-          if [ -n "${{ inputs.dockerfile_url }}" ]; then
-            echo "▶ Download Dockerfile via curl" | tee -a "$LOG_FILE"
-            run_cmd "curl -fsSL \"${{ inputs.dockerfile_url }}\" -o Dockerfile"
-          else
-            if [ -f Dockerfile ]; then
-              echo "▶ Using existing repo Dockerfile" | tee -a "$LOG_FILE"
-            else
-              echo "::error::Dockerfile이 없습니다. dockerfile_url을 입력하거나 레포 루트에 Dockerfile을 추가하세요."
-              exit 1
+
+          URL="${{ inputs.dockerfile_url }}"
+          HDR="${{ inputs.dockerfile_auth_header }}"
+          EXTRA="${{ inputs.dockerfile_extra_curl_flags }}"
+          EXPECT_SHA="${{ inputs.dockerfile_sha256 }}"
+
+          if [ -z "$URL" ]; then
+            echo "::error::dockerfile_url이 비어 있습니다."; exit 1
+          fi
+
+          # curl 명령 구성 (기본 안전 옵션 + 사용자 추가 플래그)
+          CURL_BASE="curl -fSsvL --retry 3 --retry-delay 2 --max-time 180"
+          [ -n "$EXTRA" ] && CURL_BASE="$CURL_BASE $EXTRA"
+          [ -n "$HDR" ] && CURL_BASE="$CURL_BASE -H \"$HDR\""
+
+          run_cmd "$CURL_BASE \"$URL\" -o Dockerfile"
+
+          if [ ! -s Dockerfile ]; then
+            echo "::error::Dockerfile 다운로드 실패(파일이 없거나 0바이트). URL/권한/네트워크를 확인하세요."
+            exit 1
+          fi
+
+          # (선택) SHA256 무결성 검증
+          if [ -n "$EXPECT_SHA" ]; then
+            echo "▶ SHA256 verify" | tee -a "$LOG_FILE"
+            ACTUAL_SHA="$(sha256sum Dockerfile | awk '{print $1}')"
+            echo "expected=$EXPECT_SHA" | tee -a "$LOG_FILE"
+            echo "actual  =$ACTUAL_SHA" | tee -a "$LOG_FILE"
+            if [ "$EXPECT_SHA" != "$ACTUAL_SHA" ]; then
+              echo "::error::Dockerfile SHA256 불일치"; exit 1
             fi
+          fi
+
+          # 간단한 유효성 체크(기본 구문만)
+          if ! head -n 1 Dockerfile | grep -Eq '^FROM[[:space:]]+'; then
+            echo "::warning::Dockerfile 첫 줄에 FROM이 없습니다. 정상 Dockerfile인지 확인하세요."
           fi
 
       - name: "🧰 Install Maven via curl"
