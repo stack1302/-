@@ -28,11 +28,11 @@ on:
         required: true
         default: true
       helper_url:
-        description: "echo 헬퍼 스크립트 RAW URL (/tmp/echo_helpers.sh 로 저장)"
-        required: true
-        default: "https://example.com/echo_helpers.sh"
+        description: "echo_helpers.sh RAW URL (비우면 레포 파일 사용)"
+        required: false
+        default: ""
       dockerfile_url:
-        description: "Dockerfile RAW URL (없으면 기존 Dockerfile 사용)"
+        description: "Dockerfile RAW URL (비우면 레포 파일 사용)"
         required: false
         default: ""
 
@@ -53,41 +53,47 @@ jobs:
       run:
         shell: bash
     steps:
-      # ---------- Checkout ----------
       - name: "☑️ Checkout"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ---------- Bootstrap (모든 파일 생성은 curl로만) ----------
-      - name: "🧩 Bootstrap — fetch echo helpers via curl"
+      # ---------- Bootstrap: 모든 '파일 생성'은 curl ----------
+      - name: "🧩 Bootstrap — fetch echo helpers via curl (URL or file://)"
         run: |
           set -Eeuo pipefail
           echo "[echo] mkdir -p \"$LOG_DIR\""; mkdir -p "$LOG_DIR"
 
-          echo "[echo] curl -fsSL \"${{ inputs.helper_url }}\" -o /tmp/echo_helpers.sh"
-          curl -fsSL "${{ inputs.helper_url }}" -o /tmp/echo_helpers.sh
+          if [ -n "${{ inputs.helper_url }}" ]; then
+            SRC="${{ inputs.helper_url }}"
+          else
+            SRC="file://${GITHUB_WORKSPACE}/.github/helpers/echo_helpers.sh"
+          fi
 
+          echo "[echo] curl -fsSL \"$SRC\" -o /tmp/echo_helpers.sh"
+          curl -fsSL "$SRC" -o /tmp/echo_helpers.sh
           echo "[echo] chmod +x /tmp/echo_helpers.sh"; chmod +x /tmp/echo_helpers.sh
           echo "helpers ready" | tee -a "$LOG_DIR/_init.log"
 
-      - name: "🧾 Ensure Dockerfile (curl only)"
+      - name: "🧾 Ensure Dockerfile (curl only: URL or file://)"
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh || true
-
           if [ -n "${{ inputs.dockerfile_url }}" ]; then
-            echo "[echo] curl -fsSL \"${{ inputs.dockerfile_url }}\" -o Dockerfile"
-            curl -fsSL "${{ inputs.dockerfile_url }}" -o Dockerfile
-            echo "Dockerfile downloaded via curl"
+            SRC="${{ inputs.dockerfile_url }}"
+          elif [ -f "${GITHUB_WORKSPACE}/.github/helpers/Dockerfile" ]; then
+            SRC="file://${GITHUB_WORKSPACE}/.github/helpers/Dockerfile"
+          elif [ -f "${GITHUB_WORKSPACE}/Dockerfile" ]; then
+            # 로컬 루트에 이미 있다면 그대로 사용(복사 아님) — 생성이 필요 없으니 통과
+            echo "Existing Dockerfile will be used"
+            exit 0
           else
-            if [ -f Dockerfile ]; then
-              echo "Existing Dockerfile will be used"
-            else
-              echo "::error::Dockerfile이 없습니다. dockerfile_url 입력으로 RAW URL을 제공하세요."
-              exit 1
-            fi
+            echo "::error::Dockerfile 소스가 없습니다. dockerfile_url을 주시거나 .github/helpers/Dockerfile 파일을 추가하세요."
+            exit 1
           fi
+
+          echo "[echo] curl -fsSL \"$SRC\" -o Dockerfile"
+          curl -fsSL "$SRC" -o Dockerfile
+          echo "Dockerfile ready (via curl)"
 
       # ---------- Env summary ----------
       - name: "🧭 Env & runner summary"
@@ -243,29 +249,4 @@ jobs:
           JAR_FILE="$(basename "${{ steps.saveimg.outputs.jar_file }}")"
           IMG_FILE="$(basename "${{ steps.saveimg.outputs.tar_gz }}")"
           echoe "Commands (copy & run):"
-          echo "curl -L -o ${JAR_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}" | tee -a "$LOG_FILE"
-          echo "curl -L -o ${JAR_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}.sha256" | tee -a "$LOG_FILE"
-          echo "sha256sum -c ${JAR_FILE}.sha256" | tee -a "$LOG_FILE"
-          echo "" | tee -a "$LOG_FILE"
-          echo "curl -L -o ${IMG_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}" | tee -a "$LOG_FILE"
-          echo "curl -L -o ${IMG_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}.sha256" | tee -a "$LOG_FILE"
-          echo "sha256sum -c ${IMG_FILE}.sha256" | tee -a "$LOG_FILE"
-          echo "gunzip -c ${IMG_FILE} | docker load" | tee -a "$LOG_FILE"
-          finish "Printed curl commands"
-
-      # ---------- Final summary ----------
-      - name: "✅ Final summary"
-        run: |
-          set -Eeuo pipefail
-          export LOG_FILE="$LOG_DIR/99_summary.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Final summary"
-          echoe "JAR : ${{ steps.mvn.outputs.jar_path }}"
-          echoe "Image: ${{ steps.dimg.outputs.full_image }}"
-          echoe "TGZ : ${{ steps.saveimg.outputs.tar_gz }}"
-          if [[ "${{ inputs.create_release }}" == "true" ]]; then
-            echoe "Release tag: v${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          else
-            warne "Release skipped (create_release=false)"
-          fi
-          finish "Workflow done 🎉"
+          echo "curl -L -o ${JAR_FILE} https://github.com/${OWNER}/${REPOS
