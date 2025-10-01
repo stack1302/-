@@ -1,4 +1,4 @@
-name: "Spring Boot + Docker Image + Curl (ALL-ECHO, curl-only file creation)"
+name: "Spring Boot + Docker Image + Curl (ALL-ECHO, no helper file)"
 
 on:
   workflow_dispatch:
@@ -27,12 +27,8 @@ on:
         type: boolean
         required: true
         default: true
-      helper_url:
-        description: "echo_helpers.sh RAW URL (비우면 레포 파일 사용)"
-        required: false
-        default: ""
       dockerfile_url:
-        description: "Dockerfile RAW URL (비우면 레포 파일 사용)"
+        description: "Dockerfile RAW URL (없으면 레포 루트의 Dockerfile 사용)"
         required: false
         default: ""
 
@@ -58,59 +54,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ---------- Bootstrap: 모든 '파일 생성'은 curl ----------
-      - name: "🧩 Bootstrap — fetch echo helpers via curl (URL or file://)"
-        run: |
-          set -Eeuo pipefail
-          echo "[echo] mkdir -p \"$LOG_DIR\""; mkdir -p "$LOG_DIR"
-
-          if [ -n "${{ inputs.helper_url }}" ]; then
-            SRC="${{ inputs.helper_url }}"
-          else
-            SRC="file://${GITHUB_WORKSPACE}/.github/helpers/echo_helpers.sh"
-          fi
-
-          echo "[echo] curl -fsSL \"$SRC\" -o /tmp/echo_helpers.sh"
-          curl -fsSL "$SRC" -o /tmp/echo_helpers.sh
-          echo "[echo] chmod +x /tmp/echo_helpers.sh"; chmod +x /tmp/echo_helpers.sh
-          echo "helpers ready" | tee -a "$LOG_DIR/_init.log"
-
-      - name: "🧾 Ensure Dockerfile (curl only: URL or file://)"
-        run: |
-          set -Eeuo pipefail
-          if [ -n "${{ inputs.dockerfile_url }}" ]; then
-            SRC="${{ inputs.dockerfile_url }}"
-          elif [ -f "${GITHUB_WORKSPACE}/.github/helpers/Dockerfile" ]; then
-            SRC="file://${GITHUB_WORKSPACE}/.github/helpers/Dockerfile"
-          elif [ -f "${GITHUB_WORKSPACE}/Dockerfile" ]; then
-            # 로컬 루트에 이미 있다면 그대로 사용(복사 아님) — 생성이 필요 없으니 통과
-            echo "Existing Dockerfile will be used"
-            exit 0
-          else
-            echo "::error::Dockerfile 소스가 없습니다. dockerfile_url을 주시거나 .github/helpers/Dockerfile 파일을 추가하세요."
-            exit 1
-          fi
-
-          echo "[echo] curl -fsSL \"$SRC\" -o Dockerfile"
-          curl -fsSL "$SRC" -o Dockerfile
-          echo "Dockerfile ready (via curl)"
-
-      # ---------- Env summary ----------
       - name: "🧭 Env & runner summary"
         run: |
           set -Eeuo pipefail
+          mkdir -p "$LOG_DIR"
           export LOG_FILE="$LOG_DIR/01_env_summary.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Environment summary"
+          # ── echo+실행 미니 헬퍼(스텝 로컬) ──
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
+          echo "▶ Environment summary" | tee -a "$LOG_FILE"
           run_cmd "uname -a"
           run_cmd "cat /etc/os-release || true"
           run_cmd "docker --version || true"
           run_cmd "which java || true"
           run_cmd "df -h"
-          echoe "Repo: ${GITHUB_REPOSITORY} | Run: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          finish "Env summary done"
 
-      # ---------- Java ----------
       - name: "☕ Setup Java (Temurin)"
         uses: actions/setup-java@v4
         with:
@@ -121,76 +78,83 @@ jobs:
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/02_setup_java.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           run_cmd "java -version || true"
-          finish "Java ready"
 
-      # ---------- Maven ----------
+      - name: "🧾 Ensure Dockerfile (curl-only when creating)"
+        run: |
+          set -Eeuo pipefail
+          export LOG_FILE="$LOG_DIR/03_dockerfile.log"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
+          if [ -n "${{ inputs.dockerfile_url }}" ]; then
+            echo "▶ Download Dockerfile via curl" | tee -a "$LOG_FILE"
+            run_cmd "curl -fsSL \"${{ inputs.dockerfile_url }}\" -o Dockerfile"
+          else
+            if [ -f Dockerfile ]; then
+              echo "▶ Using existing repo Dockerfile" | tee -a "$LOG_FILE"
+            else
+              echo "::error::Dockerfile이 없습니다. dockerfile_url을 입력하거나 레포 루트에 Dockerfile을 추가하세요."
+              exit 1
+            fi
+          fi
+
       - name: "🧰 Install Maven via curl"
         run: |
           set -Eeuo pipefail
-          export LOG_FILE="$LOG_DIR/03_maven_install.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Install Maven"
+          export LOG_FILE="$LOG_DIR/04_maven_install.log"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           MV="${{ inputs.maven_version }}"
           URL="https://archive.apache.org/dist/maven/maven-3/${MV}/binaries/apache-maven-${MV}-bin.tar.gz"
+          echo "▶ Install Maven ${MV}" | tee -a "$LOG_FILE"
           run_cmd "curl -fsSL \"$URL\" -o maven.tgz"
           run_cmd "sudo tar -C /opt -xzf maven.tgz"
           run_cmd "sudo ln -sf \"/opt/apache-maven-${MV}/bin/mvn\" /usr/local/bin/mvn"
           run_cmd "mvn -v"
-          finish "Maven install complete"
 
-      # ---------- Maven package ----------
       - name: "🧱 Maven Build (package)"
         id: mvn
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/05_maven_package.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Maven package"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
+          echo "▶ Maven package" | tee -a "$LOG_FILE"
           if [[ "${{ inputs.skip_tests }}" == "true" ]]; then
-            warne "Skipping tests"
             run_cmd "mvn -B -DskipTests package"
           else
             run_cmd "mvn -B package"
           fi
           JAR_PATH="$(ls -1 target/*.jar | grep -Ev 'sources|javadoc' | head -n1 || true)"
-          if [ -z "$JAR_PATH" ]; then faile "No runnable JAR in target/"; exit 1; fi
+          if [ -z "$JAR_PATH" ]; then echo "::error::target/에 실행가능 JAR이 없습니다."; exit 1; fi
           echo "jar_path=$JAR_PATH" >> "$GITHUB_OUTPUT"
-          echoe "Built JAR: $JAR_PATH"
-          finish "Maven build complete"
+          echo "Built JAR: $JAR_PATH" | tee -a "$LOG_FILE"
 
-      # ---------- Docker build ----------
       - name: "🐳 Build Docker image"
         id: dimg
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/06_docker_build.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Docker image build"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           IMG="${{ inputs.image_name }}"
           TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FULL="${IMG}:${TAG}"
           echo "full_image=$FULL" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echoe "Image tag → $FULL"
+          echo "▶ Build image: $FULL" | tee -a "$LOG_FILE"
           run_cmd "docker buildx build --load -t \"$FULL\" ."
           run_cmd "docker image ls \"$FULL\""
-          finish "Docker build complete"
 
-      # ---------- Export & checksums ----------
       - name: "📦 Export image & generate checksums"
         id: saveimg
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/07_export.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "docker save + checksums"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           OUT="dist"
-          run_cmd "mkdir -p \"$OUT\""
           IMG="${{ steps.dimg.outputs.full_image }}"
           TAR="${OUT}/$(echo "$IMG" | tr '/:' '__').tar"
           TGZ="${TAR}.gz"
+          echo "▶ Save image & checksums" | tee -a "$LOG_FILE"
+          run_cmd "mkdir -p \"$OUT\""
           run_cmd "docker save \"$IMG\" -o \"$TAR\""
           run_cmd "gzip -9 \"$TAR\""
           run_cmd "(cd \"$OUT\" && sha256sum \"$(basename \"$TGZ\")\" > \"$(basename \"$TGZ\").sha256\")"
@@ -201,10 +165,7 @@ jobs:
           run_cmd "(cd \"$OUT\" && md5sum    \"$(basename \"$JAR\")\" > \"$(basename \"$JAR\").md5\")"
           echo "tar_gz=$TGZ" >> "$GITHUB_OUTPUT"
           echo "jar_file=$OUT/$(basename "$JAR")" >> "$GITHUB_OUTPUT"
-          echoe "Artifacts ready: $OUT"
-          finish "Export & checksum complete"
 
-      # ---------- Upload artifacts ----------
       - name: "⬆️ Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
@@ -215,7 +176,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # ---------- Release ----------
       - name: "🏷️ Create Release & upload assets"
         if: ${{ inputs.create_release == true }}
         uses: softprops/action-gh-release@v2
@@ -236,17 +196,21 @@ jobs:
             dist/*.tar.gz.sha256
             dist/*.tar.gz.md5
 
-      # ---------- Curl examples ----------
       - name: "📥 Print curl download commands"
         run: |
           set -Eeuo pipefail
           export LOG_FILE="$LOG_DIR/10_curl_examples.log"
-          source /tmp/echo_helpers.sh; trap catch ERR
-          sect "Print curl download commands"
+          run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
           OWNER="${GITHUB_REPOSITORY%/*}"
           REPO="${GITHUB_REPOSITORY#*/}"
           TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           JAR_FILE="$(basename "${{ steps.saveimg.outputs.jar_file }}")"
           IMG_FILE="$(basename "${{ steps.saveimg.outputs.tar_gz }}")"
-          echoe "Commands (copy & run):"
-          echo "curl -L -o ${JAR_FILE} https://github.com/${OWNER}/${REPOS
+          echo "▶ CURL commands" | tee -a "$LOG_FILE"
+          run_cmd "echo curl -L -o ${JAR_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}"
+          run_cmd "echo curl -L -o ${JAR_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${JAR_FILE}.sha256"
+          run_cmd "echo sha256sum -c ${JAR_FILE}.sha256"
+          run_cmd "echo curl -L -o ${IMG_FILE} https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}"
+          run_cmd "echo curl -L -o ${IMG_FILE}.sha256 https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${IMG_FILE}.sha256"
+          run_cmd "echo sha256sum -c ${IMG_FILE}.sha256"
+          run_cmd "echo gunzip -c ${IMG_FILE} \| docker load"
