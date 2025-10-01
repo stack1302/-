@@ -31,12 +31,13 @@ on:
         description: "Dockerfile RAW URL (반드시 접근 가능한 정식 주소)"
         required: true
         default: "https://raw.githubusercontent.com/your-org/your-repo/main/Dockerfile"
-      dockerfile_auth_header:
-        description: "(선택) 인증 헤더. 예: Authorization: Bearer ${{ secrets.MY_TOKEN }}"
+      dockerfile_use_bearer:
+        description: "(선택) Bearer 토큰 헤더 사용 여부(레포 시크릿 DOCKERFILE_TOKEN 사용)"
+        type: boolean
         required: false
-        default: ""
+        default: false
       dockerfile_extra_curl_flags:
-        description: "(선택) 추가 curl 플래그. 예: --proto '=https' --tlsv1.2"
+        description: "(선택) 추가 curl 플래그 (예: --proto '=https' --tlsv1.2)"
         required: false
         default: ""
       dockerfile_sha256:
@@ -57,6 +58,9 @@ jobs:
   build-package-image:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # 필요 시 설정해두면 Bearer로 사용됩니다(입력 dockerfile_use_bearer=true일 때만 적용)
+      DOCKERFILE_TOKEN: ${{ secrets.DOCKERFILE_TOKEN }}
     defaults:
       run:
         shell: bash
@@ -96,7 +100,7 @@ jobs:
           run_cmd "java -version || true"
 
       # ─────────────────────────────────────────────────────────
-      # Dockerfile: 정식 URL에서 curl로 다운로드 (+옵션: 헤더/플래그/SHA256 검증)
+      # Dockerfile: 원격 URL에서 curl 다운로드 (+옵션: Bearer/추가 플래그/SHA256 검증)
       # ─────────────────────────────────────────────────────────
       - name: "🧾 Fetch Dockerfile from remote (curl-only)"
         run: |
@@ -105,7 +109,7 @@ jobs:
           run_cmd(){ local cmd="$*"; printf 'echo %q\n' "$cmd" | tee -a "${LOG_FILE:-/dev/null}"; bash -lc "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; }
 
           URL="${{ inputs.dockerfile_url }}"
-          HDR="${{ inputs.dockerfile_auth_header }}"
+          USE_BEARER="${{ inputs.dockerfile_use_bearer }}"
           EXTRA="${{ inputs.dockerfile_extra_curl_flags }}"
           EXPECT_SHA="${{ inputs.dockerfile_sha256 }}"
 
@@ -113,13 +117,24 @@ jobs:
             echo "::error::dockerfile_url이 비어 있습니다."; exit 1
           fi
 
-          # curl 명령 구성 (기본 안전 옵션 + 사용자 추가 플래그)
-          CURL_BASE="curl -fSsvL --retry 3 --retry-delay 2 --max-time 180"
+          # curl 기본 옵션(엄격/디버그/재시도/타임아웃)
+          CURL_BASE="curl -fSsvL --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 180"
           [ -n "$EXTRA" ] && CURL_BASE="$CURL_BASE $EXTRA"
-          [ -n "$HDR" ] && CURL_BASE="$CURL_BASE -H \"$HDR\""
 
-          run_cmd "$CURL_BASE \"$URL\" -o Dockerfile"
+          # 선택: Bearer 토큰 헤더 적용(시크릿에서)
+          HDRS=""
+          if [ "$USE_BEARER" = "true" ]; then
+            if [ -n "$DOCKERFILE_TOKEN" ]; then
+              HDRS="$HDRS -H \"Authorization: Bearer $DOCKERFILE_TOKEN\""
+            else
+              echo "::warning::dockerfile_use_bearer=true 이지만 DOCKERFILE_TOKEN 시크릿이 비어 있습니다. 헤더 없이 진행합니다."
+            fi
+          fi
 
+          # 다운로드
+          run_cmd "$CURL_BASE $HDRS \"$URL\" -o Dockerfile"
+
+          # 존재/사이즈 확인
           if [ ! -s Dockerfile ]; then
             echo "::error::Dockerfile 다운로드 실패(파일이 없거나 0바이트). URL/권한/네트워크를 확인하세요."
             exit 1
@@ -136,7 +151,7 @@ jobs:
             fi
           fi
 
-          # 간단한 유효성 체크(기본 구문만)
+          # 간단 문법 체크
           if ! head -n 1 Dockerfile | grep -Eq '^FROM[[:space:]]+'; then
             echo "::warning::Dockerfile 첫 줄에 FROM이 없습니다. 정상 Dockerfile인지 확인하세요."
           fi
