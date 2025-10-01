@@ -1,0 +1,6 @@
+Listing...
+linux-azure/noble-updates 6.14.0-1012.12~24.04.1 amd64 [upgradable from: 6.11.0-1018.18~24.04.1]
+linux-cloud-tools-azure/noble-updates 6.14.0-1012.12~24.04.1 amd64 [upgradable from: 6.11.0-1018.18~24.04.1]
+linux-headers-azure/noble-updates 6.14.0-1012.12~24.04.1 amd64 [upgradable from: 6.11.0-1018.18~24.04.1]
+linux-image-azure/noble-updates 6.14.0-1012.12~24.04.1 amd64 [upgradable from: 6.11.0-1018.18~24.04.1]
+linux-tools-azure/noble-updates 6.14.0-1012.12~24.04.1 amd64 [upgradable from: 6.11.0-1018.18~24.04.1]
