@@ -91,7 +91,31 @@ jobs:
             echo "ISO_LABEL=${ISO_LABEL:0:32}" >> "$GITHUB_ENV"
           fi
 
-      # ---------- Maven(항상 실행) ----------
+      # ✅ FIX: setup-java 보다 먼저 pom.xml 생성 (cache: maven 에러 방지)
+      - name: Ensure minimal pom.xml exists (for Maven cache)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ ! -s "pom.xml" ]; then
+            cat > pom.xml <<'POM'
+            <project xmlns="http://maven.apache.org/POM/4.0.0"
+                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>bootstrap.sample</groupId>
+              <artifactId>bootstrap-sample</artifactId>
+              <version>0.0.1</version>
+              <properties>
+                <maven.compiler.release>21</maven.compiler.release>
+                <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              </properties>
+            </project>
+            POM
+            echo "✅ temporary pom.xml created for setup-java cache"
+          else
+            echo "ℹ️ pom.xml already exists"
+          fi
+
       - name: Set up JDK 21 (Temurin) + Maven cache
         uses: actions/setup-java@v4
         with:
@@ -114,17 +138,13 @@ jobs:
               -o ".mvn/wrapper/maven-wrapper-${MW_VER}.jar"
           fi
           cp -f ".mvn/wrapper/maven-wrapper-${MW_VER}.jar" ".mvn/wrapper/maven-wrapper.jar"
-          curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw" -o mvnw
-          curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw.cmd" -o mvnw.cmd
+          curl -fL --retry 3 "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw" -o mvnw
+          curl -fL --retry 3 "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw.cmd" -o mvnw.cmd
           chmod +x mvnw
           cat > .mvn/wrapper/maven-wrapper.properties <<EOF
           distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VER}/apache-maven-${MAVEN_VER}-bin.zip
           wrapperUrl=https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar
           EOF
-          curl -IfsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VER}/apache-maven-${MAVEN_VER}-bin.zip" || true
-          curl -IfsSL "https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" || true
           ./mvnw -v || true
           echo "✅ Maven Wrapper ready"
 
@@ -173,27 +193,10 @@ jobs:
           cp -f .github/maven/settings.xml "$HOME/.m2/settings.xml"
           echo "✅ settings.xml written"
 
-      - name: Minimal skeleton POM (if missing) + go-offline
+      - name: Go offline (warm cache)
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [ ! -s "pom.xml" ]; then
-            cat > pom.xml <<'POM'
-            <project xmlns="http://maven.apache.org/POM/4.0.0"
-                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-              <modelVersion>4.0.0</modelVersion>
-              <groupId>bootstrap.sample</groupId>
-              <artifactId>bootstrap-sample</artifactId>
-              <version>0.0.1</version>
-              <properties>
-                <maven.compiler.release>21</maven.compiler.release>
-                <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-              </properties>
-            </project>
-            POM
-            echo "ℹ️ 'pom.xml'이 없어 최소 POM 생성"
-          fi
           ./mvnw -q -e -DskipTests dependency:go-offline || true
           ./mvnw -v || true
 
@@ -323,7 +326,6 @@ jobs:
           fi
           [ -f "packages/${SRC}-src-${TS}.tar.gz" ] && sha256sum "packages/${SRC}-src-${TS}.tar.gz" > "packages/${SRC}-src-${TS}.tar.gz.sha256" || true
 
-      # ✅ 고친 부분: 구문 오류 없이, 매치 없으면 건너뜀(nullglob)
       - name: Size cap check (no errors if none)
         id: cap
         shell: bash
@@ -334,7 +336,6 @@ jobs:
           files=( "iso_build/${ISO_NAME}.iso" packages/* )
           for f in "${files[@]}"; do
             [ -f "$f" ] || continue
-            # GNU stat(-c) 기본, macOS 대비 -f 보조
             SZ=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
             TOTAL=$(( TOTAL + SZ ))
           done
