@@ -25,9 +25,9 @@ env:
   TZ: Asia/Seoul
   MAVEN_OPTS: -Xmx1g
   LOG_DIR: .github/echo_logs
-  ECHO_OK:  "✅"
-  ECHO_WARN:"⚠️"
-  ECHO_FAIL:"❌"
+  ECHO_OK: "✅"
+  ECHO_WARN: "⚠️"
+  ECHO_FAIL: "❌"
 
 jobs:
   bankcalc:
@@ -325,7 +325,6 @@ jobs:
           else
             warn "settings.xml not found (setup-java may create one only when needed)"
           fi
-          # 캐시 힌트(첫 실행이면 cache miss 메시지가 뜰 수 있음)
           echoe "Maven cache status: setup-java managed cache (may be cold on first run)"
 
       - name: Warm up Maven cache (go-offline)
