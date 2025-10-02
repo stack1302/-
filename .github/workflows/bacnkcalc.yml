@@ -66,7 +66,6 @@ jobs:
             run_cmd mkdir -p "${BASE}/${d}"
             run_cmd touch "${BASE}/${d}/.keep"
           done
-          # 안전한 quoting으로 대량 파일 생성
           for i in $(seq 1 50); do
             ts="$(date -Iseconds)"
             file="${BASE}/echo_reports/report_${i}.txt"
@@ -176,8 +175,9 @@ jobs:
           package com.example.bank; public enum TransactionType { DEPOSIT, WITHDRAW, INTEREST }
           JAVA
 
+          # ✅ 오타 수정: package com.example.bank;
           cat <<'JAVA' > src/main/java/com/example/bank/Transaction.java
-          package com.example bank;
+          package com.example.bank;
           import java.math.BigDecimal; import java.time.LocalDateTime; import java.util.Objects;
           public class Transaction {
             private final LocalDateTime at; private final TransactionType type; private final BigDecimal amount; private final String memo; private final BigDecimal balanceAfter;
@@ -216,7 +216,7 @@ jobs:
               }
             }
             public static void runSimpleScript(Account account, File script) throws IOException {
-              try(BufferedReader br=new BufferedReader(new InputStreamReader(new FileInputStream(script), StandardCharsets.UTF_8))){
+              try(BufferedReader br=new BufferedReader(new BufferedReader(new InputStreamReader(new FileInputStream(script), StandardCharsets.UTF_8)))){
                 String line; int lineNo=0;
                 while((line=br.readLine())!=null){ lineNo++; if(lineNo==1 && line.startsWith("type")) continue; if(line.isBlank()) continue;
                   String[] p=splitCsv(line); if(p.length<2) throw new IllegalArgumentException("CSV 포맷 오류 (line "+lineNo+"): "+line);
@@ -284,7 +284,6 @@ jobs:
               a.withdraw(new BigDecimal("5000"), "테스트출금");
               assertEquals(new BigDecimal("120000"), a.getBalance());
               a.applyInterest(new BigDecimal("3.65"), 30, "이자");
-              // 120000 * 0.0365 * 30/365 = 360 → 최종 120,360
               assertEquals(new BigDecimal("120360"), a.getBalance());
             }
           }
