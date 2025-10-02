@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Echo helpers
+      - name: Prepare Echo helpers (no eval)
         shell: bash
         continue-on-error: true
         run: |
@@ -37,10 +37,11 @@ jobs:
           warn(){  printf '%s %s\n' "${ECHO_WARN}" "$*"; }
           fail(){  printf '%s %s\n' "${ECHO_FAIL}" "$*"; }
           logf(){  printf '%s\n' "$*" | tee -a "${LOG_DIR}/echo.log"; }
+          # ✅ 핵심 수정: eval 제거, 인자 경계 보존
           run_cmd(){
             logf "▶ $*"
-            eval "$@" 2>&1 | tee -a "${LOG_DIR}/echo.log"
-            local rc=${PIPESTATUS[0]}
+            "$@"
+            local rc=$?
             if [ $rc -eq 0 ]; then echoe "DONE: $*"; else warn "RC=$rc ← $*"; fi
             return $rc
           }
@@ -66,10 +67,12 @@ jobs:
             run_cmd mkdir -p "${BASE}/${d}"
             run_cmd touch "${BASE}/${d}/.keep"
           done
+          # ✅ 안전한 quoting: -lc "-- <단일 명령 문자열>"
           for i in $(seq 1 50); do
             ts="$(date -Iseconds)"
             file="${BASE}/echo_reports/report_${i}.txt"
-            run_cmd bash -lc "printf 'ECHO FILE %03d %s\n' ${i} '${ts}' > '${file}'"
+            cmd="printf 'ECHO FILE %03d %s\n' ${i} '${ts}' > '${file}'"
+            run_cmd bash -lc -- "$cmd"
           done
           echoe "Mass gen completed: ${#DIRS[@]} dirs + 50 files"
           echo "MassGen: ${#DIRS[@]} dirs + 50 files" >> "$GITHUB_STEP_SUMMARY"
@@ -175,7 +178,7 @@ jobs:
           package com.example.bank; public enum TransactionType { DEPOSIT, WITHDRAW, INTEREST }
           JAVA
 
-          # ✅ 오타 수정: package com.example.bank;
+          # Transaction.java — ✅ package 오타 방지
           cat <<'JAVA' > src/main/java/com/example/bank/Transaction.java
           package com.example.bank;
           import java.math.BigDecimal; import java.time.LocalDateTime; import java.util.Objects;
@@ -205,6 +208,7 @@ jobs:
           }
           JAVA
 
+          # CsvIo — ✅ 중복 BufferedReader 제거
           cat <<'JAVA' > src/main/java/com/example/bank/CsvIo.java
           package com.example.bank;
           import java.io.*; import java.math.BigDecimal; import java.nio.charset.StandardCharsets; import java.util.List;
@@ -216,16 +220,31 @@ jobs:
               }
             }
             public static void runSimpleScript(Account account, File script) throws IOException {
-              try(BufferedReader br=new BufferedReader(new BufferedReader(new InputStreamReader(new FileInputStream(script), StandardCharsets.UTF_8)))){
+              try(BufferedReader br=new BufferedReader(new InputStreamReader(new FileInputStream(script), StandardCharsets.UTF_8))){
                 String line; int lineNo=0;
-                while((line=br.readLine())!=null){ lineNo++; if(lineNo==1 && line.startsWith("type")) continue; if(line.isBlank()) continue;
+                while((line=br.readLine())!=null){
+                  lineNo++; if(lineNo==1 && line.startsWith("type")) continue; if(line.isBlank()) continue;
                   String[] p=splitCsv(line); if(p.length<2) throw new IllegalArgumentException("CSV 포맷 오류 (line "+lineNo+"): "+line);
                   String type=p[0].trim().toUpperCase(); BigDecimal amount=new BigDecimal(p[1].trim()); String memo=p.length>=3?p[2].trim():"";
-                  switch(type){ case "DEPOSIT" -> account.deposit(amount,memo); case "WITHDRAW" -> account.withdraw(amount,memo); case "INTEREST" -> { if(amount.signum()>0) account.deposit(amount, memo.isEmpty()? "정액 이자": memo); } default -> throw new IllegalArgumentException("지원하지 않는 타입: "+type); }
+                  switch(type){
+                    case "DEPOSIT" -> account.deposit(amount,memo);
+                    case "WITHDRAW" -> account.withdraw(amount,memo);
+                    case "INTEREST" -> { if(amount.signum()>0) account.deposit(amount, memo.isEmpty()? "정액 이자": memo); }
+                    default -> throw new IllegalArgumentException("지원하지 않는 타입: "+type);
+                  }
                 }
               }
             }
-            private static String[] splitCsv(String line){ boolean inQuote=false; StringBuilder cur=new StringBuilder(); java.util.List<String> out=new java.util.ArrayList<>(); for(int i=0;i<line.length();i++){ char c=line.charAt(i); if(c=='\"') inQuote=!inQuote; else if(c==',' && !inQuote){ out.add(cur.toString()); cur.setLength(0);} else cur.append(c);} out.add(cur.toString()); return out.toArray(new String[0]); }
+            private static String[] splitCsv(String line){
+              boolean inQuote=false; StringBuilder cur=new StringBuilder(); java.util.List<String> out=new java.util.ArrayList<>();
+              for(int i=0;i<line.length();i++){
+                char c=line.charAt(i);
+                if(c=='\"') inQuote=!inQuote;
+                else if(c==',' && !inQuote){ out.add(cur.toString()); cur.setLength(0);}
+                else cur.append(c);
+              }
+              out.add(cur.toString()); return out.toArray(new String[0]);
+            }
           }
           JAVA
 
