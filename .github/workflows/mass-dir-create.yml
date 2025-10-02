@@ -28,7 +28,7 @@ on:
       options:
         description: "CSV 플래그: gen,placeholders,rock,joliet,release,pkgzip,pkgtar"
         required: true
-        default: "gen,placeholders,rock,joliet,pkgzip,pkgtar" # 스케줄 기본값: release 제외 권장
+        default: "gen,placeholders,rock,joliet,pkgzip,pkgtar"
       iso_source_dir:
         description: "ISO로 묶을 소스 디렉토리"
         required: true
@@ -67,6 +67,7 @@ jobs:
       ISO_NAME: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_output_name) || 'github-dir' }}
       ISO_LABEL: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_label) || 'GITHUB_DIR' }}
       COMMIT_MSG_IN: ${{ (github.event_name == 'workflow_dispatch' && inputs.commit_message) || '' }}
+      KEEP_RUNS: "5" # 오래된 리포트/패키지 보존 개수
 
     steps:
       - name: Checkout
@@ -121,17 +122,22 @@ jobs:
           apt -v   > "${REPORT_DIR}/apt-version.txt" 2>&1 || true
           dpkg -l  > "${REPORT_DIR}/packages.before.txt" 2>&1 || true
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.before.txt" || true
-
           sudo apt-get update -y
           sudo apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew" upgrade | tee "${REPORT_DIR}/upgrade.raw.log"
           sudo apt-get -y autoremove --purge || true
           sudo apt-get -y clean || true
-
           echo >> "${REPORT_DIR}/UPGRADE.md"
           echo "## Upgradable (after)" >> "${REPORT_DIR}/UPGRADE.md"
           apt list --upgradable 2>/dev/null | sort > "${REPORT_DIR}/upgradable.after.txt" || true
           dpkg -l  > "${REPORT_DIR}/packages.after.txt" 2>&1 || true
           { echo; echo "### Summary"; echo "- Updated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "- Files:"; ls -1 "${REPORT_DIR}"; } >> "${REPORT_DIR}/UPGRADE.md"
+          # 요약을 Step Summary에도 출력
+          {
+            echo "### Upgrade Summary"
+            echo "- Report: ${REPORT_DIR}"
+            echo "- Upgradable(before): $(wc -l < "${REPORT_DIR}/upgradable.before.txt" 2>/dev/null || echo 0)"
+            echo "- Upgradable(after):  $(wc -l < "${REPORT_DIR}/upgradable.after.txt" 2>/dev/null || echo 0)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post-verify dpkg warnings
         shell: bash
@@ -155,10 +161,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # 정수/범위
           [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수"; exit 1; }
           [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수"; exit 1; }
-          (( TOP <= 20000 )) || { echo "top_count 과다"; exit 1; }
-          SAFE_ROOT="${ROOT_DIR#./}"; [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir 비었음"; exit 1; }
+          (( TOP >= 0 && TOP <= 20000 )) || { echo "top_count 범위 초과(0~20000)"; exit 1; }
+          (( SUB >= 0 && SUB <= 200 )) || { echo "sub_count 범위 초과(0~200)"; exit 1; }
+          # 경로 안전성
+          SAFE_ROOT="${ROOT_DIR#./}"
+          [[ -n "${SAFE_ROOT}" ]] || { echo "root_dir 비었음"; exit 1; }
+          [[ "${SAFE_ROOT}" != /* ]] || { echo "root_dir는 리포지토리 내부 상대경로여야 함"; exit 1; }
+          [[ "${SAFE_ROOT}" != *".."* ]] || { echo "root_dir 상위 참조 불가(..)"; exit 1; }
+          # ISO 라벨 최대 32자
+          if [ ${#ISO_LABEL} -gt 32 ]; then
+            echo "경고: ISO_LABEL 32자 초과 → 자동절단"
+            ISO_LABEL="${ISO_LABEL:0:32}"
+            echo "ISO_LABEL=${ISO_LABEL}" >> "$GITHUB_ENV"
+          fi
           mkdir -p "${SAFE_ROOT}"
 
       - name: Create mass directories (optional by flag)
@@ -175,6 +193,8 @@ jobs:
           for i in $(seq 1 "${TOP}"); do
             idx_top=$(pad "${width_top}" "${i}")
             D="${ROOT}/${PREF}${idx_top}"
+            # 경로 길이 과도 방지
+            (( ${#D} < 220 )) || { echo "경고: 경로 너무 김 → 중단"; exit 1; }
             mkdir -p "${D}"
             if [[ "${ADD_FILES}" == "true" ]]; then
               [[ -f "${D}/.keep" ]] || printf "placeholder for %s\n" "${D}" > "${D}/.keep"
@@ -184,6 +204,7 @@ jobs:
               for j in $(seq 1 "${SUB}"); do
                 idx_sub=$(pad "${width_sub}" "${j}")
                 SD="${D}/${SUBP}${idx_sub}"
+                (( ${#SD} < 240 )) || { echo "경고: 하위 경로 너무 김 → 중단"; exit 1; }
                 mkdir -p "${SD}"
                 if [[ "${ADD_FILES}" == "true" ]]; then
                   [[ -f "${SD}/.keep" ]] || printf "placeholder for %s\n" "${SD}" > "${SD}/.keep"
@@ -210,13 +231,14 @@ jobs:
           set -Eeuo pipefail
           TS=".github/test-server"; LOG="${TS}/server.log"; PIDF="${TS}/server.pid"
           nohup python3 -m http.server 8080 --directory "${TS}" > "${LOG}" 2>&1 & echo $! > "${PIDF}"
-          sleep 1; ps -p "$(cat "${PIDF}")" -o pid,cmd=
+          sleep 1; ps -p "$(cat "${PIDF}")" -o pid,cmd= || true
 
       - name: Health check (retry)
         shell: bash
         run: |
           set -Eeuo pipefail
           TS=".github/test-server"; OUT="${TS}/curl-health.log"
+          : > "${OUT}"
           for i in $(seq 1 10); do
             if curl -fsS http://127.0.0.1:8080/healthz.txt >> "${OUT}" 2>&1; then echo "healthz OK try ${i}" | tee -a "${OUT}"; break; fi
             echo "retry ${i}..." | tee -a "${OUT}"; sleep 1
@@ -238,23 +260,23 @@ jobs:
           set -Eeuo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
+          # 변경사항 스테이징
           git add ".github/upgrade-report" || true
           [ -d "${ROOT_DIR}" ] && git add "${ROOT_DIR}" || true
           [ -d ".github/mass-dir-report" ] && git add ".github/mass-dir-report" || true
           git add ".github/test-server" || true
-
+          # 변경이 없으면 타임스탬프 파일로 강제 커밋
           if git diff --cached --quiet; then
             mkdir -p .github/commit-trace
             date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/commit-trace/last-run.txt
             git add .github/commit-trace/last-run.txt
           fi
-
           COMMIT_MSG="${COMMIT_MSG_IN}"
           if [ -z "${COMMIT_MSG}" ]; then
-            COMMIT_MSG="chore(auto): $(date -u +%Y-%m-%dT%H:%M:%SZ) run ${GITHUB_RUN_ID}#${GITHUB_RUN_NUMBER} (${GITHUB_EVENT_NAME})"
+            COMMIT_MSG="chore(auto): $(date -u +%Y-%m-%dT%H:%M:%SZ) run ${GITHUB_RUN_ID}#${GITHUB_RUN_NUMBER} (${GITHUB_EVENT_NAME}) [skip ci]"
+          else
+            COMMIT_MSG="${COMMIT_MSG} [skip ci]"
           fi
-
           git commit -m "${COMMIT_MSG}" || { echo "No changes to commit"; exit 0; }
           git push
 
@@ -265,6 +287,10 @@ jobs:
           set -Eeuo pipefail
           SRC="${SRC_DIR#./}"; [ -d "${SRC}" ] || { echo "소스 디렉토리(${SRC_DIR}) 없음"; exit 1; }
           mkdir -p iso_build/staging iso_build/meta packages
+          # rsync 보장을 위해 설치
+          if ! command -v rsync >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y rsync
+          fi
           rsync -a --delete "${SRC}/" "iso_build/staging/${SRC}/"
           find "iso_build/staging/${SRC}" -mindepth 1 -maxdepth 1 -type d | sort > iso_build/meta/top_dirs.txt || true
           find "iso_build/staging/${SRC}" -type f | sort > iso_build/meta/files.txt || true
@@ -302,6 +328,7 @@ jobs:
           set -Eeuo pipefail
           SRC="${SRC_DIR#./}"
           TS=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p packages
           if [[ "${PKGZIP}" == "true" ]]; then
             (cd iso_build/staging && zip -r "../../packages/${SRC}-src-${TS}.zip" "${SRC}")
             sha256sum "packages/${SRC}-src-${TS}.zip" > "packages/${SRC}-src-${TS}.zip.sha256"
@@ -327,19 +354,34 @@ jobs:
             .github/test-server/server.log
             .github/test-server/curl-health.log
           if-no-files-found: warn
+          retention-days: 7
 
-      # --- 릴리즈 태그/이름/파일 목록 준비 (여기서만 쉘 변수 사용) ---
+      # --- 오래된 리포트/패키지 정리(최근 KEEP_RUNS만 유지) ---
+      - name: Prune old reports/packages (keep last N)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          prune_dir(){ d="$1"; keep="$2"; [ -d "$d" ] || return 0; ls -1 "$d" | sort | head -n -${keep} | while read -r x; do rm -rf "$d/$x"; done 2>/dev/null || true; }
+          prune_dir ".github/upgrade-report" "${KEEP_RUNS}"
+          prune_dir ".github/mass-dir-report" "${KEEP_RUNS}"
+          # packages/는 타임스탬프 파일명 기반 정리
+          if [ -d "packages" ]; then
+            ls -1 packages | sort | head -n -200 | while read -r f; do rm -f "packages/$f"; done 2>/dev/null || true
+          fi
+
+      # --- 릴리즈 태그/이름/파일 목록 준비 ---
       - name: Compute release metadata
         id: relmeta
         if: ${{ steps.flags.outputs.release == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          TAG="v${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          # 태그는 안전 문자열로 제한
+          SAFE_RUN="${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          TAG="v${SAFE_RUN}"
           NAME="Auto Release — ${ISO_NAME} @ Run #${GITHUB_RUN_NUMBER}"
           echo "tag=${TAG}"   >> "$GITHUB_OUTPUT"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
-          # 존재하는 파일만 리스트업
           FILES=""
           for f in \
             "iso_build/${ISO_NAME}.iso" \
@@ -350,7 +392,6 @@ jobs:
             [ -e "$f" ] && FILES="${FILES}${f}\n"
           done
           printf "%b" "$FILES" > files.txt
-          # GitHub Actions에서 멀티라인 출력을 위한 안전 처리
           FILES_ESCAPED=$(perl -pe 's/%/%25/g; s/\n/%0A/g; s/\r/%0D/g' files.txt)
           echo "files=${FILES_ESCAPED}" >> "$GITHUB_OUTPUT"
 
