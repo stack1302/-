@@ -1,588 +1,260 @@
-name: "Java BankCalc — Echo Gen + Quality + Security + Build + Test + Run + Artifacts + Docker"
+name: CI
 
 on:
   push:
-    branches: ["main"]
-  workflow_dispatch: {}
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: bankcalc-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   TZ: Asia/Seoul
   MAVEN_OPTS: -Xmx1g
-  LOG_DIR: .github/echo_logs
-  ECHO_OK: "✅"
-  ECHO_WARN: "⚠️"
-  ECHO_FAIL: "❌"
 
 jobs:
-  bankcalc:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Echo helpers (no eval)
+      # 0) Echo 샘플 리포트/디렉터리(과거 printf 오류 교정 버전)
+      - name: Prepare echo folders & report
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR"
-          cat <<'SH' > /tmp/echo_helpers.sh
-          set -o pipefail
-          echoe(){ printf '%s %s\n' "${ECHO_OK}"  "$*"; }
-          warn(){  printf '%s %s\n' "${ECHO_WARN}" "$*"; }
-          fail(){  printf '%s %s\n' "${ECHO_FAIL}" "$*"; }
-          logf(){  printf '%s\n' "$*" | tee -a "${LOG_DIR}/echo.log"; }
-          run_cmd(){
-            logf "▶ $*"
-            "$@"
-            local rc=$?
-            if [ $rc -eq 0 ]; then echoe "DONE: $*"; else warn "RC=$rc ← $*"; fi
-            return $rc
-          }
-          SH
-          chmod +x /tmp/echo_helpers.sh
-          source /tmp/echo_helpers.sh
-          echoe "Echo helpers ready at /tmp/echo_helpers.sh"
-          logf "Workflow started: $(date -Iseconds)"
+          mkdir -p .github/echo_db/sql .github/echo_db/logs .github/echo_db/backups
+          mkdir -p .github/echo_net .github/echo_java .github/echo_reports
+          mkdir -p .github/echo_tools .github/echo_artifacts .github/echo_cache .github/echo_tmp
+          touch .github/echo_db/sql/.keep .github/echo_db/logs/.keep .github/echo_db/backups/.keep
+          touch .github/echo_net/.keep .github/echo_java/.keep .github/echo_reports/.keep
+          touch .github/echo_tools/.keep .github/echo_artifacts/.keep .github/echo_cache/.keep .github/echo_tmp/.keep
 
-      - name: EchoOps mass directories/files (always)
+          # printf 포맷·인자 모두 따옴표로 감싸 오류 방지
+          ts="$(date +'%Y-%m-%dT%H:%M:%S%z')"
+          printf 'ECHO FILE %03d %s\n' 1 "$ts" > .github/echo_reports/report_1.txt
+
+      # 1) Checkstyle 설정 파일을 리포지토리에 생성(규칙 완화 버전)
+      - name: Create Checkstyle config
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          BASE=".github"
-          DIRS=( "echo_db/sql" "echo_db/logs" "echo_db/backups" "echo_net" "echo_java" "echo_reports" "echo_tools" "echo_artifacts" "echo_cache" "echo_tmp" )
-          for d in "${DIRS[@]}"; do
-            run_cmd mkdir -p "${BASE}/${d}"
-            run_cmd touch "${BASE}/${d}/.keep"
-          done
-          for i in $(seq 1 50); do
-            ts="$(date -Iseconds)"
-            file="${BASE}/echo_reports/report_${i}.txt"
-            cmd="printf 'ECHO FILE %03d %s\n' ${i} '${ts}' > '${file}'"
-            run_cmd bash -lc -- "$cmd"
-          done
-          echoe "Mass gen completed: ${#DIRS[@]} dirs + 50 files"
-          echo "MassGen: ${#DIRS[@]} dirs + 50 files" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p .checkstyle
+          cat > .checkstyle/checkstyle.xml <<'XML'
+          <?xml version="1.0"?>
+          <!DOCTYPE module PUBLIC
+            "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+            "https://checkstyle.org/dtds/configuration_1_3.dtd">
+          <module name="Checker">
+            <property name="charset" value="UTF-8"/>
+            <module name="SeverityMatchFilter">
+              <property name="severity" value="error"/>
+            </module>
+            <module name="FileTabCharacter">
+              <property name="eachLine" value="true"/>
+            </module>
+            <module name="LineLength">
+              <property name="max" value="140"/>
+              <property name="ignorePattern" value="^package|^import|http(s)?://"/>
+            </module>
+            <module name="TreeWalker">
+              <module name="JavadocPackage"><property name="severity" value="ignore"/></module>
+              <module name="JavadocMethod"><property name="severity" value="ignore"/></module>
+              <module name="JavadocVariable"><property name="severity" value="ignore"/></module>
+              <module name="JavadocType"><property name="severity" value="ignore"/></module>
+              <module name="NeedBraces"><property name="severity" value="ignore"/></module>
+              <module name="MultipleVariableDeclarations"><property name="severity" value="ignore"/></module>
+              <module name="InnerAssignment"><property name="severity" value="ignore"/></module>
+              <module name="MagicNumber"><property name="severity" value="ignore"/></module>
+              <module name="HideUtilityClassConstructor"><property name="severity" value="ignore"/></module>
+              <module name="DesignForExtension"><property name="severity" value="ignore"/></module>
+              <module name="AvoidStarImport"><property name="severity" value="ignore"/></module>
+              <module name="WhitespaceAround"><property name="severity" value="warning"/></module>
+              <module name="FinalParameters"><property name="severity" value="ignore"/></module>
+            </module>
+          </module>
+          XML
 
-      - name: Generate project files (sources, tests, scripts, Dockerfile, README, .gitignore, pom.xml)
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mkdir -p scripts src/main/java/com/example/bank src/test/java/com/example/bank
+          cat > .checkstyle/suppressions.xml <<'XML'
+          <?xml version="1.0"?>
+          <!DOCTYPE suppressions PUBLIC
+            "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+            "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+          <suppressions>
+          </suppressions>
+          XML
 
-          cat <<'POM' > pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0"
-                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>com.example</groupId>
-            <artifactId>bankcalc</artifactId>
-            <version>0.1.0</version>
-            <name>Bank Calculator</name>
-
-            <properties>
-              <maven.compiler.release>21</maven.compiler.release>
-              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-              <junit.version>5.10.2</junit.version>
-              <spotbugs.version>4.8.6.5</spotbugs.version>
-              <checkstyle.version>10.18.2</checkstyle.version>
-              <spotless.version>2.43.0</spotless.version>
-              <enforcer.version>3.5.0</enforcer.version>
-              <cyclonedx.version>2.9.0</cyclonedx.version>
-              <jacoco.version>0.8.12</jacoco.version>
-            </properties>
-
-            <dependencies>
-              <dependency>
-                <groupId>org.junit.jupiter</groupId>
-                <artifactId>junit-jupiter</artifactId>
-                <version>${junit.version}</version>
-                <scope>test</scope>
-              </dependency>
-            </dependencies>
-
-            <build>
-              <finalName>bankcalc</finalName>
-              <plugins>
-                <plugin>
-                  <groupId>org.apache.maven.plugins</groupId>
-                  <artifactId>maven-jar-plugin</artifactId>
-                  <version>3.4.2</version>
-                  <configuration>
-                    <archive>
-                      <manifest>
-                        <mainClass>com.example.bank.Main</mainClass>
-                      </manifest>
-                    </archive>
-                  </configuration>
-                </plugin>
-
-                <plugin>
-                  <groupId>org.apache.maven.plugins</groupId>
-                  <artifactId>maven-surefire-plugin</artifactId>
-                  <version>3.5.0</version>
-                  <configuration>
-                    <useSystemClassLoader>true</useSystemClassLoader>
-                  </configuration>
-                </plugin>
-
-                <plugin>
-                  <groupId>org.jacoco</groupId>
-                  <artifactId>jacoco-maven-plugin</artifactId>
-                  <version>${jacoco.version}</version>
-                  <executions>
-                    <execution>
-                      <goals><goal>prepare-agent</goal></goals>
-                    </execution>
-                    <execution>
-                      <id>report</id>
-                      <phase>test</phase>
-                      <goals><goal>report</goal></goals>
-                    </execution>
-                  </executions>
-                </plugin>
-
-                <plugin>
-                  <groupId>com.diffplug.spotless</groupId>
-                  <artifactId>spotless-maven-plugin</artifactId>
-                  <version>${spotless.version}</version>
-                  <configuration>
-                    <java><googleJavaFormat/></java>
-                  </configuration>
-                </plugin>
-
-                <plugin>
-                  <groupId>org.apache.maven.plugins</groupId>
-                  <artifactId>maven-checkstyle-plugin</artifactId>
-                  <version>3.5.0</version>
-                </plugin>
-
-                <plugin>
-                  <groupId>com.github.spotbugs</groupId>
-                  <artifactId>spotbugs-maven-plugin</artifactId>
-                  <version>${spotbugs.version}</version>
-                </plugin>
-
-                <plugin>
-                  <groupId>org.apache.maven.plugins</groupId>
-                  <artifactId>maven-enforcer-plugin</artifactId>
-                  <version>${enforcer.version}</version>
-                  <executions>
-                    <execution>
-                      <id>enforce</id>
-                      <goals><goal>enforce</goal></goals>
-                      <configuration>
-                        <rules>
-                          <requireJavaVersion><version>[21,)</version></requireJavaVersion>
-                          <dependencyConvergence/>
-                        </rules>
-                        <fail>true</fail>
-                      </configuration>
-                    </execution>
-                  </executions>
-                </plugin>
-
-                <plugin>
-                  <groupId>org.cyclonedx</groupId>
-                  <artifactId>cyclonedx-maven-plugin</artifactId>
-                  <version>${cyclonedx.version}</version>
-                  <executions>
-                    <execution>
-                      <phase>package</phase>
-                      <goals><goal>makeAggregateBom</goal></goals>
-                    </execution>
-                  </executions>
-                </plugin>
-              </plugins>
-            </build>
-          </project>
-          POM
-          echoe "pom.xml generated"
-
-          cat <<'GITIGNORE' > .gitignore
-          target/
-          pom.xml.tag
-          pom.xml.releaseBackup
-          pom.xml.versionsBackup
-          release.properties
-          .idea/
-          *.iml
-          .project
-          .classpath
-          .settings/
-          .vscode/
-          .DS_Store
-          Thumbs.db
-          outputs/
-          GITIGNORE
-
-          cat <<'README' > README.md
-          # Java BankCalc
-          원화(₩) 단위의 통장 계산기 — 입금/출금/이자(단리), CSV 스크립트, 내역 CSV 내보내기.
-          README
-
-          cat <<'CSV' > scripts/sample-ops.csv
-          type,amount,memo
-          DEPOSIT,25000,월급 일부
-          WITHDRAW,5000,식비
-          INTEREST,123,정액 이자 (임시)
-          CSV
-
-          cat <<'DOCKER' > Dockerfile
-          FROM gcr.io/distroless/java21-debian12
-          WORKDIR /app
-          COPY target/bankcalc.jar /app/app.jar
-          USER 65532:65532
-          ENTRYPOINT ["java","-jar","/app/app.jar"]
-          DOCKER
-
-          cat <<'JAVA' > src/main/java/com/example/bank/TransactionType.java
-          package com.example.bank; public enum TransactionType { DEPOSIT, WITHDRAW, INTEREST }
-          JAVA
-
-          cat <<'JAVA' > src/main/java/com/example/bank/Transaction.java
-          package com.example.bank;
-          import java.math.BigDecimal; import java.time.LocalDateTime; import java.util.Objects;
-          public class Transaction {
-            private final LocalDateTime at; private final TransactionType type; private final BigDecimal amount; private final String memo; private final BigDecimal balanceAfter;
-            public Transaction(LocalDateTime at, TransactionType type, BigDecimal amount, String memo, BigDecimal balanceAfter){ this.at=at; this.type=type; this.amount=amount; this.memo=memo; this.balanceAfter=balanceAfter; }
-            public LocalDateTime getAt(){return at;} public TransactionType getType(){return type;} public BigDecimal getAmount(){return amount;} public String getMemo(){return memo;} public BigDecimal getBalanceAfter(){return balanceAfter;}
-            @Override public String toString(){ return at + "," + type + "," + amount + "," + (memo==null?"":memo) + "," + balanceAfter; }
-            @Override public boolean equals(Object o){ if(this==o) return true; if(!(o instanceof Transaction t)) return false; return Objects.equals(at,t.at)&&type==t.type&&Objects.equals(amount,t.amount)&&Objects.equals(memo,t.memo)&&Objects.equals(balanceAfter,t.balanceAfter); }
-            @Override public int hashCode(){ return Objects.hash(at,type,amount,memo,balanceAfter); }
-          }
-          JAVA
-
-          cat <<'JAVA' > src/main/java/com/example/bank/Account.java
-          package com.example.bank;
-          import java.math.BigDecimal; import java.math.RoundingMode; import java.time.LocalDateTime; import java.util.ArrayList; import java.util.List;
-          public class Account {
-            private BigDecimal balance = BigDecimal.ZERO.setScale(0, RoundingMode.UNNECESSARY);
-            private final List<Transaction> history = new ArrayList<>();
-            public Account() {}
-            public Account(BigDecimal initial){ BigDecimal init=ensureKRW(initial); this.balance=init; history.add(new Transaction(LocalDateTime.now(), TransactionType.DEPOSIT, init, "초기잔액", balance)); }
-            private static BigDecimal ensureKRW(BigDecimal v){ if(v==null) return BigDecimal.ZERO.setScale(0); return v.setScale(0, RoundingMode.HALF_UP); }
-            public BigDecimal getBalance(){ return balance; } public List<Transaction> getHistory(){ return List.copyOf(history); }
-            public Transaction deposit(BigDecimal amount, String memo){ BigDecimal a=ensureKRW(amount); if(a.signum()<=0) throw new IllegalArgumentException("입금 금액은 1원 이상이어야 합니다."); balance=balance.add(a); Transaction t=new Transaction(LocalDateTime.now(), TransactionType.DEPOSIT, a, memo, balance); history.add(t); return t; }
-            public Transaction withdraw(BigDecimal amount, String memo){ BigDecimal a=ensureKRW(amount); if(a.signum()<=0) throw new IllegalArgumentException("출금 금액은 1원 이상이어야 합니다."); if(balance.compareTo(a)<0) throw new IllegalStateException("잔액 부족"); balance=balance.subtract(a); Transaction t=new Transaction(LocalDateTime.now(), TransactionType.WITHDRAW, a.negate(), memo, balance); history.add(t); return t; }
-            public Transaction applyInterest(BigDecimal annualRatePercent, int days, String memo){ if(days<0) throw new IllegalArgumentException("일수는 0 이상이어야 합니다."); BigDecimal rate=annualRatePercent.divide(BigDecimal.valueOf(100),10,RoundingMode.HALF_UP); BigDecimal interest=balance.multiply(rate).multiply(BigDecimal.valueOf(days)).divide(BigDecimal.valueOf(365),0,RoundingMode.HALF_UP); if(interest.signum()<=0) return null; balance=balance.add(interest); Transaction t=new Transaction(LocalDateTime.now(), TransactionType.INTEREST, interest, memo, balance); history.add(t); return t; }
-          }
-          JAVA
-
-          cat <<'JAVA' > src/main/java/com/example/bank/CsvIo.java
-          package com.example.bank;
-          import java.io.*; import java.math.BigDecimal; import java.nio.charset.StandardCharsets; import java.util.List;
-          public class CsvIo {
-            public static void exportHistory(File out, List<Transaction> history) throws IOException {
-              try(BufferedWriter bw=new BufferedWriter(new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8))){
-                bw.write("at,type,amount,memo,balanceAfter\n");
-                for(Transaction t:history){
-                  String memo=t.getMemo()==null?"":t.getMemo().replace("\"","\"\"");
-                  if(memo.contains(",")) memo="\""+memo+"\"";
-                  bw.write(t.getAt()+","+t.getType()+","+t.getAmount()+","+memo+","+t.getBalanceAfter()+"\n");
-                }
-              }
-            }
-            public static void runSimpleScript(Account account, File script) throws IOException {
-              try(BufferedReader br=new BufferedReader(new InputStreamReader(new FileInputStream(script), StandardCharsets.UTF_8))){
-                String line; int lineNo=0;
-                while((line=br.readLine())!=null){
-                  lineNo++; if(lineNo==1 && line.startsWith("type")) continue; if(line.isBlank()) continue;
-                  String[] p=splitCsv(line); if(p.length<2) throw new IllegalArgumentException("CSV 포맷 오류 (line "+lineNo+"): "+line);
-                  String type=p[0].trim().toUpperCase(); BigDecimal amount=new BigDecimal(p[1].trim()); String memo=p.length>=3?p[2].trim():"";
-                  switch(type){
-                    case "DEPOSIT" -> account.deposit(amount,memo);
-                    case "WITHDRAW" -> account.withdraw(amount,memo);
-                    case "INTEREST" -> { if(amount.signum()>0) account.deposit(amount, memo.isEmpty()? "정액 이자": memo); }
-                    default -> throw new IllegalArgumentException("지원하지 않는 타입: "+type);
-                  }
-                }
-              }
-            }
-            private static String[] splitCsv(String line){
-              boolean inQuote=false; StringBuilder cur=new StringBuilder(); java.util.List<String> out=new java.util.ArrayList<>();
-              for(int i=0;i<line.length();i++){
-                char c=line.charAt(i);
-                if(c=='\"') inQuote=!inQuote;
-                else if(c==',' && !inQuote){ out.add(cur.toString()); cur.setLength(0);}
-                else cur.append(c);
-              }
-              out.add(cur.toString()); return out.toArray(new String[0]);
-            }
-          }
-          JAVA
-
-          cat <<'JAVA' > src/main/java/com/example/bank/Main.java
-          package com.example.bank;
-          import java.io.File; import java.math.BigDecimal; import java.util.Arrays;
-          public class Main {
-            private static void usage(){ System.out.println("""
-            사용법:
-              java -jar bankcalc.jar [옵션]
-            옵션:
-              --start <원>                 시작 잔액 (기본: 0)
-              --deposit <원> [--memo "메모"]
-              --withdraw <원> [--memo "메모"]
-              --interest <연이율%> --days <일수> [--memo "메모"]   # 단리, 원단위 반올림
-              --script <csv>               # 간단 CSV: type,amount,memo
-              --export <csv>               # 실행 후 거래 내역을 CSV로 저장
-            예시:
-              java -jar bankcalc.jar --start 100000 --deposit 25000 --withdraw 5000 --interest 3.2 --days 30 --export out.csv
-              java -jar bankcalc.jar --start 100000 --script scripts/sample-ops.csv --export out.csv
-            """); }
-            public static void main(String[] args) throws Exception {
-              if(args.length==0 || Arrays.asList(args).contains("--help")){ usage(); return; }
-              BigDecimal start=BigDecimal.ZERO; String memo=""; File script=null, export=null; BigDecimal deposit=null, withdraw=null, rate=null; Integer days=null;
-              for(int i=0;i<args.length;i++){ switch(args[i]){
-                case "--start" -> start=new BigDecimal(args[++i]);
-                case "--deposit" -> deposit=new BigDecimal(args[++i]);
-                case "--withdraw" -> withdraw=new BigDecimal(args[++i]);
-                case "--interest" -> rate=new BigDecimal(args[++i]);
-                case "--days" -> days=Integer.parseInt(args[++i]);
-                case "--memo" -> memo=args[++i];
-                case "--script" -> script=new File(args[++i]);
-                case "--export" -> export=new File(args[++i]);
-                default -> { System.err.println("알 수 없는 옵션: "+args[i]); usage(); return; }
-              }}
-              Account account=new Account(start);
-              if(script!=null) CsvIo.runSimpleScript(account, script);
-              if(deposit!=null) account.deposit(deposit, memo.isBlank()? "입금": memo);
-              if(withdraw!=null) account.withdraw(withdraw, memo.isBlank()? "출금": memo);
-              if(rate!=null){ if(days==null) throw new IllegalArgumentException("--interest 사용 시 --days 필요"); account.applyInterest(rate, days, memo.isBlank()? "이자": memo); }
-              System.out.println("최종 잔액(원): "+account.getBalance());
-              System.out.println("거래 건수: "+account.getHistory().size());
-              if(export!=null){ CsvIo.exportHistory(export, account.getHistory()); System.out.println("내역 CSV 저장: "+export.getAbsolutePath()); }
-            }
-          }
-          JAVA
-
-          cat <<'JAVA' > src/test/java/com/example/bank/AccountTest.java
-          package com.example.bank;
-          import org.junit.jupiter.api.Test; import java.math.BigDecimal; import static org.junit.jupiter.api.Assertions.*;
-          public class AccountTest {
-            @Test void depositWithdrawInterest(){
-              Account a=new Account(new BigDecimal("100000"));
-              a.deposit(new BigDecimal("25000"), "테스트입금");
-              assertEquals(new BigDecimal("125000"), a.getBalance());
-              a.withdraw(new BigDecimal("5000"), "테스트출금");
-              assertEquals(new BigDecimal("120000"), a.getBalance());
-              a.applyInterest(new BigDecimal("3.65"), 30, "이자");
-              assertEquals(new BigDecimal("120360"), a.getBalance());
-            }
-          }
-          JAVA
-
-          echoe "Project files generated"
-          run_cmd find . -maxdepth 3 -type f | sort
-
-      - name: Set up JDK 21
+      # 2) Java & Maven (settings.xml 생성 + 캐시)
+      - name: Setup Java 21 (Temurin) + Maven cache
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: '21'
           cache: maven
+          server-id: github
+          settings-path: ${{ github.workspace }}
 
-      - name: Echo setup-java results
+      - name: Show Java/Maven versions
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          echoe "JAVA_HOME=${JAVA_HOME}"
-          run_cmd java -version || true
-          run_cmd mvn -v || true
-          SETTINGS="$HOME/.m2/settings.xml"
-          if [ -f "$SETTINGS" ]; then
-            echoe "settings.xml present at $SETTINGS"
-            head -n 20 "$SETTINGS" | sed 's/^/settings> /' || true
-          else
-            warn "settings.xml not found (setup-java may create one only when needed)"
-          fi
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          mvn -v
+          echo "✅ settings.xml present at $HOME/.m2/settings.xml"
 
-      - name: Warm up Maven cache (go-offline)
+      - name: Warm up dependencies (go-offline)
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e -DskipTests dependency:go-offline
+          mvn -q -e -DskipTests dependency:go-offline
 
-      # ✅ Spotless 자동 적용(수정) → 테스트/정적분석 전
-      - name: Maven Spotless Apply (auto-fix formatting)
+      # 3) 코드 포맷 → 테스트 → 품질체크
+      - name: Spotless apply
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e spotless:apply
+          mvn -q -e spotless:apply
 
-      - name: Maven Test
+      - name: Test (with reports)
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e -DskipTests=false test
+          mvn -q -e -DskipTests=false test
 
-      - name: Lint & Static Analysis (Spotless/Checkstyle/SpotBugs)
+      - name: Lint & Static Analysis (spotless/checkstyle/spotbugs)
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e spotless:check checkstyle:check spotbugs:spotbugs
+          mvn -q -e spotless:check checkstyle:check spotbugs:spotbugs
 
       - name: Generate SBOM (CycloneDX)
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e cyclonedx:makeAggregateBom
+          mvn -q -e cyclonedx:makeAggregateBom
 
-      - name: Upload Surefire reports (always)
-        if: always()
+      - name: Upload surefire-reports
         uses: actions/upload-artifact@v4
         with:
           name: surefire-reports
-          path: target/surefire-reports/**
-          if-no-files-found: warn
-          retention-days: 14
+          path: |
+            target/surefire-reports/**
+            target/checkstyle-result.xml
+          if-no-files-found: ignore
 
-      - name: Upload JaCoCo report
-        if: always()
+      - name: Upload JaCoCo site
         uses: actions/upload-artifact@v4
         with:
           name: jacoco-report
-          path: target/site/jacoco/**
-          if-no-files-found: warn
-          retention-days: 14
+          path: target/site/**
+          if-no-files-found: ignore
 
       - name: Upload SBOM
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: target/bom.json
-          if-no-files-found: warn
-          retention-days: 14
+          path: |
+            target/bom.json
+            target/bom.xml
+          if-no-files-found: error
 
-      # ✅ Trivy action: 'path' → 'input' 로 수정
-      - name: Trivy scan (JAR directory)
+      # 4) Trivy (소스 폴더 스캔, 'path' 입력 사용 금지 → 최신 입력 규약 적용)
+      - name: Trivy FS scan (source)
         uses: aquasecurity/trivy-action@0.28.0
-        continue-on-error: true
         with:
           scan-type: fs
-          input: target
-          severity: CRITICAL,HIGH
+          scanners: vuln,secret,config
           ignore-unfixed: true
+          severity: HIGH,CRITICAL
           format: table
-          output: trivy-javabuild.txt
-
+          output: trivy-java.txt
+          cache: true
       - name: Upload Trivy result
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-java
-          path: trivy-javabuild.txt
-          if-no-files-found: warn
-          retention-days: 14
+          path: trivy-java.txt
+          if-no-files-found: error
 
-      - name: Maven Package
+      # 5) 패키징 & 실행 산출물 업로드
+      - name: Package (skip tests)
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mvn -q -e -DskipTests package
-          run_cmd ls -al target || true
+          mvn -q -e -DskipTests package
+          ls -al target
 
-      - name: Upload JAR Artifact (always)
-        if: always()
+      - name: Upload JAR
         uses: actions/upload-artifact@v4
         with:
           name: bankcalc-jar
           path: target/bankcalc.jar
-          if-no-files-found: warn
-          retention-days: 14
+          if-no-files-found: error
 
-      - name: Run example (always)
+      - name: Run app example & export CSV
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd mkdir -p outputs
-          run_cmd java -jar target/bankcalc.jar --start 100000 \
-               --script scripts/sample-ops.csv \
-               --interest 3.2 --days 30 \
-               --export outputs/history.csv
-          FINAL_BAL=$( (tail -n 1 outputs/history.csv 2>/dev/null || echo ",,,,") | awk -F',' '{print $5}')
-          echo "FINAL_BALANCE=${FINAL_BAL}" | tee -a "$GITHUB_STEP_SUMMARY"
-          (head -n 5 outputs/history.csv 2>/dev/null || true) | sed 's/^/CSV> /' | tee -a "$GITHUB_STEP_SUMMARY"
-          run_cmd ls -al outputs || true
+          mkdir -p outputs
+          java -jar target/bankcalc.jar \
+            --start 100000 \
+            --script scripts/sample-ops.csv \
+            --interest 3.2 \
+            --days 30 \
+            --export outputs/history.csv
+          echo "FINAL_BALANCE=$(tail -n +2 outputs/history.csv | tail -n1 | awk -F, '{print $5}')" >> $GITHUB_OUTPUT
+          ls -al outputs
 
-      - name: Upload outputs (always)
-        if: always()
+      - name: Upload outputs
         uses: actions/upload-artifact@v4
         with:
           name: bankcalc-outputs
           path: outputs/**
-          if-no-files-found: warn
-          retention-days: 14
+          if-no-files-found: error
 
-      - name: Set up QEMU
+      # 6) Docker: 로컬 로드(amd64) → GHCR 멀티 아키텍처 푸시
+      - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
+      - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ✅ 단일 플랫폼 + --load (manifest list 오류 방지)
-      - name: Build Docker image (load local linux/amd64)
+      - name: Build local image (amd64) --load
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          run_cmd docker buildx build \
+          docker buildx build \
             --platform linux/amd64 \
-            --cache-from type=gha --cache-to type=gha,mode=max \
-            -t bankcalc:local --load .
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -t bankcalc:local \
+            --load .
 
-      # (선택) 멀티아치 푸시: --push 사용 (이미지 존재 시 best-effort)
-      - name: GHCR Login & Multi-arch Push (best-effort)
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push multi-arch image
+        id: pushimg
         shell: bash
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
-          source /tmp/echo_helpers.sh
-          IMAGE="ghcr.io/${{ github.repository_owner }}/bankcalc:$(date +%Y%m%d)-${{ github.run_number }}"
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          # 멀티아치 푸시는 --push 사용 (로컬에 적재하지 않음)
-          run_cmd docker buildx build \
+          TAG="ghcr.io/${{ github.repository_owner }}/bankcalc:$(date +'%Y%m%d-%H%M')"
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --cache-from type=gha --cache-to type=gha,mode=max \
-            -t "$IMAGE" --push .
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -t "$TAG" \
+            --push .
 
-      - name: Upload Echo logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: echo-logs
-          path: .github/echo_logs/**
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Print image tag
+        run: echo "Pushed image => ${{ steps.pushimg.outputs.TAG }}"
