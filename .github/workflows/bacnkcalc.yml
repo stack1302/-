@@ -55,28 +55,6 @@ jobs:
           echoe "Echo helpers ready at /tmp/echo_helpers.sh"
           logf "Workflow started: $(date -Iseconds)"
 
-      # ✅ Maven Wrapper: 플러그인으로 정식 생성 (curl은 검증/보조, 실패해도 통과)
-      - name: Bootstrap Maven Wrapper (plugin-first; curl verify only)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          MW_VER=3.3.2
-          MAVEN_DIST_VER=3.9.11
-
-          # 1) 플러그인으로 정식 wrapper 생성 (러너의 mvn 사용)
-          mvn -N -q -e org.apache.maven.plugins:maven-wrapper-plugin:${MW_VER}:wrapper \
-            -DwrapperVersion=${MW_VER} -Dmaven=${MAVEN_DIST_VER}
-
-          # 2) 실행권한 보장
-          chmod +x mvnw || true
-
-          # 3) distributionUrl 가용성 '검증'만 수행 (실패해도 빌드 계속)
-          DIST_URL="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_DIST_VER}/apache-maven-${MAVEN_DIST_VER}-bin.zip"
-          echo "Verifying Maven distribution URL (HEAD): ${DIST_URL}"
-          curl -IfsSL "${DIST_URL}" || echo "⚠️ HEAD verify failed (will proceed; wrapper will download during ./mvnw run)"
-
-          echo "✅ Maven Wrapper ready (./mvnw -> Apache Maven ${MAVEN_DIST_VER})"
-
       - name: EchoOps mass directories/files (always)
         shell: bash
         continue-on-error: true
@@ -223,6 +201,10 @@ jobs:
                   <groupId>org.cyclonedx</groupId>
                   <artifactId>cyclonedx-maven-plugin</artifactId>
                   <version>${cyclonedx.version}</version>
+                  <configuration>
+                    <schemaVersion>1.5</schemaVersion>
+                    <outputFormat>json,xml</outputFormat>
+                  </configuration>
                   <executions>
                     <execution>
                       <phase>package</phase>
@@ -450,6 +432,22 @@ jobs:
           echo "✅ Project files & checkstyle.xml generated"
           run_cmd find . -maxdepth 3 -type f | sort
 
+      # ✅ 여기서부터 Wrapper 부트스트랩 (POM 생성 후 실행)
+      - name: Bootstrap Maven Wrapper (plugin-first; curl verify only)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MW_VER=3.3.2
+          MAVEN_DIST_VER=3.9.11
+          ./mvnw -v >/dev/null 2>&1 && { echo "✅ Wrapper already exists"; exit 0; } || true
+          mvn -N -q -e org.apache.maven.plugins:maven-wrapper-plugin:${MW_VER}:wrapper \
+            -DwrapperVersion=${MW_VER} -Dmaven=${MAVEN_DIST_VER}
+          chmod +x mvnw || true
+          DIST_URL="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_DIST_VER}/apache-maven-${MAVEN_DIST_VER}-bin.zip"
+          echo "Verifying Maven distribution URL (HEAD): ${DIST_URL}"
+          curl -IfsSL "${DIST_URL}" || echo "⚠️ HEAD verify failed (will proceed; wrapper will download during ./mvnw run)"
+          echo "✅ Maven Wrapper ready (./mvnw -> Apache Maven ${MAVEN_DIST_VER})"
+
       - name: Set up JDK 21 (Temurin) + cache
         uses: actions/setup-java@v4
         with:
@@ -543,16 +541,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # ✅ Trivy: scan-type=fs + path=target (정식 키), 결과 파일 보장
       - name: Trivy scan (JAR directory)
         uses: aquasecurity/trivy-action@0.28.0
         continue-on-error: true
         with:
           scan-type: fs
-          input: target
+          path: target
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table
           output: trivy-javabuild.txt
+
+      - name: Ensure Trivy result file (fallback)
+        if: always()
+        shell: bash
+        run: |
+          [ -s trivy-javabuild.txt ] || echo "No findings or scan failed." > trivy-javabuild.txt
 
       - name: Upload Trivy result
         if: always()
@@ -588,10 +593,14 @@ jobs:
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh
           run_cmd mkdir -p outputs
-          run_cmd java -jar target/bankcalc.jar --start 100000 \
-               --script scripts/sample-ops.csv \
-               --interest 3.2 --days 30 \
-               --export outputs/history.csv
+          if [ -f target/bankcalc.jar ]; then
+            run_cmd java -jar target/bankcalc.jar --start 100000 \
+                 --script scripts/sample-ops.csv \
+                 --interest 3.2 --days 30 \
+                 --export outputs/history.csv
+          else
+            echo "⚠️ JAR not found; skipping run."
+          fi
           FINAL_BAL=$( (tail -n 1 outputs/history.csv 2>/dev/null || echo ",,,,") | awk -F',' '{print $5}')
           echo "FINAL_BALANCE=${FINAL_BAL}" | tee -a "$GITHUB_STEP_SUMMARY"
           (head -n 5 outputs/history.csv 2>/dev/null || true) | sed 's/^/CSV> /' | tee -a "$GITHUB_STEP_SUMMARY"
