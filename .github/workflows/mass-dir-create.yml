@@ -1,4 +1,4 @@
-name: "🗂️ Mass Dir + 📀 ISO + 📦 Packages + 🚀 Release (q10m, fast-safe + Maven bootstrap)"
+name: "🗂️ Mass Dir + 📀 ISO + 📦 Packages + 🚀 Release (all-steps, no-skip)"
 
 on:
   schedule:
@@ -25,10 +25,6 @@ on:
         description: "하위 디렉토리 접두어"
         required: true
         default: "sub-"
-      options:
-        description: "CSV 플래그: gen,placeholders,rock,joliet,release,pkgzip,pkgtar,sysupgrade,fast,maven"
-        required: true
-        default: "gen,placeholders,rock,joliet,pkgzip,pkgtar,fast" # 성능 기본값: sysupgrade/release/maven Off
       iso_source_dir:
         description: "ISO로 묶을 소스 디렉토리"
         required: true
@@ -56,19 +52,17 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       ROOT_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.root_dir) || '.github/echo_mass' }}
-      TOP_IN:  ${{ (github.event_name == 'workflow_dispatch' && inputs.top_count) || '600' }}
-      SUB_IN:  ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_count) || '3' }}
-      PREF:    ${{ (github.event_name == 'workflow_dispatch' && inputs.prefix) || 'dir-' }}
-      SUBP:    ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_prefix) || 'sub-' }}
-      OPTIONS: ${{ (github.event_name == 'workflow_dispatch' && inputs.options) || 'gen,placeholders,rock,joliet,pkgzip,pkgtar,fast' }}
+      TOP: ${{ (github.event_name == 'workflow_dispatch' && inputs.top_count) || '600' }}
+      SUB: ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_count) || '3' }}
+      PREF: ${{ (github.event_name == 'workflow_dispatch' && inputs.prefix) || 'dir-' }}
+      SUBP: ${{ (github.event_name == 'workflow_dispatch' && inputs.sub_prefix) || 'sub-' }}
       SRC_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_source_dir) || '.github' }}
-      ISO_NAME:  ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_output_name) || 'github-dir' }}
+      ISO_NAME: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_output_name) || 'github-dir' }}
       ISO_LABEL: ${{ (github.event_name == 'workflow_dispatch' && inputs.iso_label) || 'GITHUB_DIR' }}
       COMMIT_MSG_IN: ${{ (github.event_name == 'workflow_dispatch' && inputs.commit_message) || '' }}
-      KEEP_RUNS: "5"
       ISO_TIMEOUT: "420"
       ZIP_TIMEOUT: "300"
       RSYNC_TIMEOUT: "180"
@@ -80,51 +74,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Parse flags & fast-tune
-        id: flags
+      - name: Validate inputs (no-skip)
         shell: bash
         run: |
           set -Eeuo pipefail
-          has(){ [[ ",${OPTIONS}," == *",$1,"* ]]; }
-          FAST=$(has fast && echo true || echo false)
-          SYSUP=$(has sysupgrade && echo true || echo false)
-          GEN=$(has gen && echo true || echo false)
-          PLACE=$(has placeholders && echo true || echo false)
-          ROCK=$(has rock && echo true || echo false)
-          JOLIET=$(has joliet && echo true || echo false)
-          REL=$(has release && echo true || echo false)
-          PKGZIP=$(has pkgzip && echo true || echo false)
-          PKGTAR=$(has pkgtar && echo true || echo false)
-          MAVN=$(has maven && echo true || echo false)
-
-          TOP="${TOP_IN}"
-          SUB="${SUB_IN}"
-          if [[ "${FAST}" == "true" ]]; then
-            (( TOP > 800 )) && TOP=800
-            (( SUB > 4 ))   && SUB=4
-          fi
-
-          {
-            echo "gen=${GEN}"
-            echo "placeholders=${PLACE}"
-            echo "rock=${ROCK}"
-            echo "joliet=${JOLIET}"
-            echo "release=${REL}"
-            echo "pkgzip=${PKGZIP}"
-            echo "pkgtar=${PKGTAR}"
-            echo "fast=${FAST}"
-            echo "sysupgrade=${SYSUP}"
-            echo "maven=${MAVN}"
-            echo "top=${TOP}"
-            echo "sub=${SUB}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Validate inputs & safety (quick)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          TOP="${{ steps.flags.outputs.top }}"
-          SUB="${{ steps.flags.outputs.sub }}"
           [[ "${TOP}" =~ ^[0-9]+$ ]] || { echo "top_count는 정수"; exit 1; }
           [[ "${SUB}" =~ ^[0-9]+$ ]] || { echo "sub_count는 정수"; exit 1; }
           (( TOP >= 0 && TOP <= 20000 )) || { echo "top_count 범위 초과(0~20000)"; exit 1; }
@@ -138,56 +91,44 @@ jobs:
             echo "ISO_LABEL=${ISO_LABEL:0:32}" >> "$GITHUB_ENV"
           fi
 
-      # ---------------- Maven: 파일/설정 전부 자동 부트스트랩(옵션) ----------------
-      - name: (Maven) Setup Temurin JDK 21 + cache
-        if: ${{ steps.flags.outputs.maven == 'true' }}
+      # ---------- Maven(항상 실행) ----------
+      - name: Set up JDK 21 (Temurin) + Maven cache
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - name: (Maven) Bootstrap Wrapper (plugin-first + correct curl fallback)
-        if: ${{ steps.flags.outputs.maven == 'true' }}
+      - name: Bootstrap Maven Wrapper (plugin-first + correct curl fallback)
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 고정 버전(404 없는 공식 경로)
           MW_VER="3.3.2"
-          MAVEN_VER="3.9.9"  # 3.9.11도 가능, 여기서는 안정 검증된 3.9.9 사용
-          # 1) 플러그인으로 정식 wrapper 생성 시도(리포에 pom이 없어도 -N 로컬단 root wrapper 가능)
+          MAVEN_VER="3.9.11"
           mvn -N -q -e org.apache.maven.plugins:maven-wrapper-plugin:${MW_VER}:wrapper \
             -DwrapperVersion=${MW_VER} -Dmaven=${MAVEN_VER} || true
-          # 2) curl 백업: 공식 GitHub Release & Maven Central
           mkdir -p .mvn/wrapper
-          # wrapper jar
           if [ ! -s ".mvn/wrapper/maven-wrapper-${MW_VER}.jar" ]; then
             curl -fL --retry 3 \
               "https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" \
               -o ".mvn/wrapper/maven-wrapper-${MW_VER}.jar"
           fi
           cp -f ".mvn/wrapper/maven-wrapper-${MW_VER}.jar" ".mvn/wrapper/maven-wrapper.jar"
-          # mvnw / mvnw.cmd
           curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw" \
-            -o mvnw
+            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw" -o mvnw
           curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw.cmd" \
-            -o mvnw.cmd
+            "https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/${MW_VER}/mvnw.cmd" -o mvnw.cmd
           chmod +x mvnw
-          # wrapper properties (정확한 공식 URL)
           cat > .mvn/wrapper/maven-wrapper.properties <<EOF
           distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VER}/apache-maven-${MAVEN_VER}-bin.zip
           wrapperUrl=https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar
           EOF
-          # 링크 검증(HEAD) - 실패해도 계속
-          curl -IfsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VER}/apache-maven-${MAVEN_VER}-bin.zip" || echo "⚠️ distribution HEAD fail"
-          curl -IfsSL "https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" || echo "⚠️ wrapper HEAD fail"
+          curl -IfsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VER}/apache-maven-${MAVEN_VER}-bin.zip" || true
+          curl -IfsSL "https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" || true
           ./mvnw -v || true
-          echo "✅ Maven Wrapper ready (./mvnw, Maven ${MAVEN_VER}, wrapper ${MW_VER})"
+          echo "✅ Maven Wrapper ready"
 
-      - name: (Maven) Write settings.xml (central https + github server)
-        if: ${{ steps.flags.outputs.maven == 'true' }}
+      - name: Write settings.xml (HTTPS central + github server)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -214,9 +155,6 @@ jobs:
             <profiles>
               <profile>
                 <id>force-https</id>
-                <properties>
-                  <maven.wagon.http.pool>false</maven.wagon.http.pool>
-                </properties>
                 <repositories>
                   <repository>
                     <id>central</id>
@@ -233,14 +171,12 @@ jobs:
           </settings>
           XML
           cp -f .github/maven/settings.xml "$HOME/.m2/settings.xml"
-          echo "✅ settings.xml written to \$HOME/.m2/settings.xml"
+          echo "✅ settings.xml written"
 
-      - name: (Maven) Minimal skeleton POM (if needed)
-        if: ${{ steps.flags.outputs.maven == 'true' }}
+      - name: Minimal skeleton POM (if missing) + go-offline
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/maven_skeleton
           if [ ! -s "pom.xml" ]; then
             cat > pom.xml <<'POM'
             <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -256,63 +192,51 @@ jobs:
               </properties>
             </project>
             POM
-            echo "ℹ️ 'pom.xml' 없어서 최소 POM을 생성했습니다."
+            echo "ℹ️ 'pom.xml'이 없어 최소 POM 생성"
           fi
           ./mvnw -q -e -DskipTests dependency:go-offline || true
           ./mvnw -v || true
 
-      # ---------------- (옵션) 시스템 업그레이드 ----------------
-      - name: System upgrade (optional & timed)
-        if: ${{ steps.flags.outputs.sysupgrade == 'true' }}
+      # ---------- 시스템 업그레이드 ----------
+      - name: System upgrade (timed)
         shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -Eeuo pipefail
-          timeout -k 20 240 sudo apt-get update -y
+          timeout -k 20 240 sudo apt-get update -y || true
           timeout -k 30 240 sudo apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confnew" upgrade || true
           sudo apt-get -y autoremove --purge || true
           sudo apt-get -y clean || true
 
-      # ---------------- (옵션) 대량 디렉토리 ----------------
-      - name: Create mass directories (fast, optional)
-        if: ${{ steps.flags.outputs.gen == 'true' }}
+      # ---------- 대량 디렉토리 ----------
+      - name: Create mass directories (no-skip)
         shell: bash
-        env:
-          ADD_FILES: ${{ steps.flags.outputs.placeholders }}
         run: |
           set -Eeuo pipefail
           ROOT="${ROOT_DIR#./}"
-          TOP="${{ steps.flags.outputs.top }}"
-          SUB="${{ steps.flags.outputs.sub }}"
           mkdir -p "${ROOT}"
           pad(){ printf "%0${1}d" "${2}"; }
           wtop=${#TOP}; (( wtop < 3 )) && wtop=3
           wsub=${#SUB}; (( wsub < 2 )) && wsub=2
-          end=$(( $(date +%s) + 90 ))
+          end=$(( $(date +%s) + 120 ))
           for i in $(seq 1 "${TOP}"); do
             now=$(date +%s); (( now > end )) && { echo "시간 초과(디렉토리 생성)"; break; }
             i1=$(pad "${wtop}" "${i}")
             D="${ROOT}/${PREF}${i1}"
-            (( ${#D} < 220 )) || { echo "경고: 경로 너무 김 → 중단"; break; }
             mkdir -p "${D}"
-            if [[ "${ADD_FILES}" == "true" ]]; then
-              [[ -f "${D}/.keep" ]] || printf "placeholder for %s\n" "${D}" > "${D}/.keep"
-            fi
+            [[ -f "${D}/.keep" ]] || printf "placeholder for %s\n" "${D}" > "${D}/.keep"
             (( SUB > 0 )) || continue
             for j in $(seq 1 "${SUB}"); do
               now=$(date +%s); (( now > end )) && { echo "시간 초과(하위 생성)"; break; }
               j1=$(pad "${wsub}" "${j}")
               SD="${D}/${SUBP}${j1}"
-              (( ${#SD} < 240 )) || { echo "경고: 하위 경로 너무 김 → 중단"; break; }
               mkdir -p "${SD}"
-              if [[ "${ADD_FILES}" == "true" ]]; then
-                [[ -f "${SD}/.keep" ]] || printf "placeholder for %s\n" "${SD}" > "${SD}/.keep"
-              fi
+              [[ -f "${SD}/.keep" ]] || printf "placeholder for %s\n" "${SD}" > "${SD}/.keep"
             done
           done
 
-      # ---------------- 빠른 헬스체크 ----------------
+      # ---------- 빠른 헬스체크 ----------
       - name: Quick HTTP healthcheck
         shell: bash
         run: |
@@ -326,7 +250,7 @@ jobs:
           done
           pkill -f "python3 -m http.server 8080" 2>/dev/null || true
 
-      # ---------------- 커밋/푸시 ----------------
+      # ---------- 커밋/푸시 ----------
       - name: Commit & Push (always) [skip ci]
         shell: bash
         run: |
@@ -342,12 +266,12 @@ jobs:
             date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/commit-trace/last-run.txt
             git add .github/commit-trace/last-run.txt
           fi
-          MSG="${COMMIT_MSG_IN}"; [ -z "${MSG}" ] && MSG="chore(auto-fast): $(date -u +%Y-%m-%dT%H:%M:%SZ) ${GITHUB_RUN_ID}#${GITHUB_RUN_NUMBER} [skip ci]"
+          MSG="${COMMIT_MSG_IN}"; [ -z "${MSG}" ] && MSG="chore(auto, no-skip): $(date -u +%Y-%m-%dT%H:%M:%SZ) ${GITHUB_RUN_ID}#${GITHUB_RUN_NUMBER} [skip ci]"
           git commit -m "${MSG}" || { echo "No changes to commit"; exit 0; }
-          git push
+          git push || true
 
-      # ---------------- ISO/패키징 준비 ----------------
-      - name: Prepare staging with rsync (fast excludes)
+      # ---------- ISO/패키징 준비 ----------
+      - name: Prepare staging with rsync (excludes + timeout)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -363,80 +287,69 @@ jobs:
           find "iso_build/staging/${SRC}" -mindepth 1 -maxdepth 1 -type d | sort > iso_build/meta/top_dirs.txt || true
           find "iso_build/staging/${SRC}" -type f | sort > iso_build/meta/files.txt || true
 
-      - name: Install ISO tools (xorriso, zip, pigz)
+      - name: Install ISO tools (xorriso, genisoimage, zip, pigz)
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y xorriso zip pigz
+          sudo apt-get install -y xorriso genisoimage zip pigz
 
       - name: Build ISO (timed)
         shell: bash
-        env:
-          ROCK:   ${{ steps.flags.outputs.rock }}
-          JOLIET: ${{ steps.flags.outputs.joliet }}
         run: |
           set -Eeuo pipefail
           OUT="iso_build/${ISO_NAME}.iso"; LABEL="${ISO_LABEL}"
-          RR_FLAG=""; J_FLAG=""
-          [[ "${ROCK}" == "true"  ]] && RR_FLAG="-R"
-          [[ "${JOLIET}" == "true" ]] && J_FLAG="-J"
-          timeout -k 20 ${ISO_TIMEOUT} xorriso -as mkisofs ${RR_FLAG} ${J_FLAG} -V "${LABEL}" -input-charset utf-8 -o "${OUT}" iso_build/staging || { echo "ISO timeout or fail"; }
+          timeout -k 20 ${ISO_TIMEOUT} xorriso -as mkisofs -R -J -V "${LABEL}" -input-charset utf-8 -o "${OUT}" iso_build/staging || true
           [ -s "${OUT}" ] || { echo "ISO not created"; exit 0; }
           sha256sum "${OUT}" > "iso_build/${ISO_NAME}.sha256"
           md5sum    "${OUT}" > "iso_build/${ISO_NAME}.md5"
-          which isoinfo >/dev/null 2>&1 && isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
+          isoinfo -i "${OUT}" -f > "iso_build/${ISO_NAME}.filelist.txt" || true
 
-      - name: Package (zip/tar) fast mode
+      - name: Package (zip/tar) with timeout
         shell: bash
-        env:
-          PKGZIP: ${{ steps.flags.outputs.pkgzip }}
-          PKGTAR: ${{ steps.flags.outputs.pkgtar }}
-          FAST:   ${{ steps.flags.outputs.fast }}
         run: |
           set -Eeuo pipefail
           SRC="${SRC_DIR#./}"
           TS=$(date -u +%Y%m%dT%H%M%SZ)
           mkdir -p packages
-          if [[ "${PKGZIP}" == "true" ]]; then
-            timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && zip -q -0 -r "../../packages/${SRC}-src-'${TS}'.zip" "${SRC}")' || true
-            [ -f "packages/${SRC}-src-${TS}.zip" ] && sha256sum "packages/${SRC}-src-${TS}.zip" > "packages/${SRC}-src-${TS}.zip.sha256" || true
-            [ -f "iso_build/${ISO_NAME}.iso" ] && timeout -k 10 ${ZIP_TIMEOUT} zip -q -0 -j "packages/${ISO_NAME}-${TS}.iso.zip" "iso_build/${ISO_NAME}.iso" || true
-            [ -f "packages/${ISO_NAME}-${TS}.iso.zip" ] && sha256sum "packages/${ISO_NAME}-${TS}.iso.zip" > "packages/${ISO_NAME}-${TS}.iso.zip.sha256" || true
+          timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && zip -q -0 -r "../../packages/${SRC}-src-'${TS}'.zip" "${SRC}")' || true
+          [ -f "packages/${SRC}-src-${TS}.zip" ] && sha256sum "packages/${SRC}-src-${TS}.zip" > "packages/${SRC}-src-${TS}.zip.sha256" || true
+          [ -f "iso_build/${ISO_NAME}.iso" ] && timeout -k 10 ${ZIP_TIMEOUT} zip -q -0 -j "packages/${ISO_NAME}-${TS}.iso.zip" "iso_build/${ISO_NAME}.iso" || true
+          [ -f "packages/${ISO_NAME}-${TS}.iso.zip" ] && sha256sum "packages/${ISO_NAME}-${TS}.iso.zip" > "packages/${ISO_NAME}-${TS}.iso.zip.sha256" || true
+          if command -v pigz >/dev/null 2>&1; then
+            timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && tar -I pigz -cf "../../packages/'${SRC}'-src-'${TS}'.tar.gz" "${SRC}")' || true
+          else
+            timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && tar -czf "../../packages/'${SRC}'-src-'${TS}'.tar.gz" "${SRC}")' || true
           fi
-          if [[ "${PKGTAR}" == "true" ]]; then
-            if command -v pigz >/dev/null 2>&1; then
-              timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && tar -I pigz -cf "../../packages/'${SRC}'-src-'${TS}'.tar.gz" "${SRC}")' || true
-            else
-              timeout -k 10 ${ZIP_TIMEOUT} bash -lc '(cd iso_build/staging && tar -czf "../../packages/'${SRC}'-src-'${TS}'.tar.gz" "${SRC}")' || true
-            fi
-            [ -f "packages/${SRC}-src-${TS}.tar.gz" ] && sha256sum "packages/${SRC}-src-${TS}.tar.gz" > "packages/${SRC}-src-${TS}.tar.gz.sha256" || true
-          fi
+          [ -f "packages/${SRC}-src-${TS}.tar.gz" ] && sha256sum "packages/${SRC}-src-${TS}.tar.gz" > "packages/${SRC}-src-${TS}.tar.gz.sha256" || true
 
-      - name: Size cap check (skip big uploads)
+      # ✅ 고친 부분: 구문 오류 없이, 매치 없으면 건너뜀(nullglob)
+      - name: Size cap check (no errors if none)
         id: cap
         shell: bash
         run: |
           set -Eeuo pipefail
+          shopt -s nullglob
           TOTAL=0
-          for f in iso_build/${ISO_NAME}.iso packages/* 2>/dev/null; do
+          files=( "iso_build/${ISO_NAME}.iso" packages/* )
+          for f in "${files[@]}"; do
             [ -f "$f" ] || continue
-            SZ=$(stat -c%s "$f")
+            # GNU stat(-c) 기본, macOS 대비 -f 보조
+            SZ=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
             TOTAL=$(( TOTAL + SZ ))
           done
           echo "bytes=${TOTAL}" >> "$GITHUB_OUTPUT"
-          LIM=$(( ${MAX_UPLOAD_MB} * 1024 * 1024 ))
+          LIM=$(( MAX_UPLOAD_MB * 1024 * 1024 ))
           if (( TOTAL > LIM )); then
             echo "exceed=true"  >> "$GITHUB_OUTPUT"
           else
             echo "exceed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload artifacts (fast policy)
+      - name: Upload artifacts (full set)
         uses: actions/upload-artifact@v4
-        if: ${{ steps.cap.outputs.exceed == 'false' }}
         with:
-          name: ${{ env.ISO_NAME }}-iso-packages-and-logs
+          name: ${{ env.ISO_NAME }}-bundle
           path: |
             iso_build/${{ env.ISO_NAME }}.iso
             iso_build/${{ env.ISO_NAME }}.sha256
@@ -445,24 +358,10 @@ jobs:
             packages/*
             .github/test-server/server.log
           if-no-files-found: warn
-          retention-days: 5
+          retention-days: 7
 
-      - name: Upload artifacts (small-only when big)
-        uses: actions/upload-artifact@v4
-        if: ${{ steps.cap.outputs.exceed == 'true' }}
-        with:
-          name: ${{ env.ISO_NAME }}-minimal
-          path: |
-            iso_build/${{ env.ISO_NAME }}.sha256
-            iso_build/${{ env.ISO_NAME }}.md5
-            iso_build/${{ env.ISO_NAME }}.filelist.txt
-            packages/*.sha256
-          if-no-files-found: warn
-          retention-days: 5
-
-      - name: Compute release metadata
+      - name: Compute release metadata (always)
         id: relmeta
-        if: ${{ steps.flags.outputs.release == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -485,8 +384,7 @@ jobs:
           FILES_ESCAPED=$(perl -pe 's/%/%25/g; s/\n/%0A/g; s/\r/%0D/g' files.txt)
           echo "files=${FILES_ESCAPED}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release and upload assets
-        if: ${{ steps.flags.outputs.release == 'true' }}
+      - name: Create GitHub Release and upload assets (no-skip)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.relmeta.outputs.tag }}
@@ -495,10 +393,9 @@ jobs:
           generate_release_notes: true
           make_latest: false
           body: |
-            ## Automated Release (fast mode)
+            ## Automated Release (no-skip)
             - Source: `${{ env.SRC_DIR }}`
             - ISO Label: `${{ env.ISO_LABEL }}`
-            - Options: `${{ env.OPTIONS }}`
             - Run: `${{ github.run_id }} / ${{ github.run_number }}`
             - Time (UTC): ${{ github.run_started_at }}
           files: ${{ steps.relmeta.outputs.files }}
