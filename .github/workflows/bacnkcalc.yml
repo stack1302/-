@@ -64,9 +64,14 @@ jobs:
             run_cmd mkdir -p "${BASE}/${d}"
             run_cmd touch "${BASE}/${d}/.keep"
           done
+
+          # 안전한 quoting으로 대량 파일 생성
           for i in $(seq 1 50); do
-            run_cmd bash -c "printf 'ECHO FILE %03d %s\n' ${i} \"$(date -Iseconds)\" > ${BASE}/echo_reports/report_${i}.txt"
+            ts="$(date -Iseconds)"
+            file="${BASE}/echo_reports/report_${i}.txt"
+            run_cmd bash -lc "printf 'ECHO FILE %03d %s\n' ${i} '${ts}' > '${file}'"
           done
+
           echoe "Mass gen completed: ${#DIRS[@]} dirs + 50 files"
           echo "MassGen: ${#DIRS[@]} dirs + 50 files" >> "$GITHUB_STEP_SUMMARY"
 
