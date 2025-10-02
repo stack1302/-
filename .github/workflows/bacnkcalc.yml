@@ -55,43 +55,25 @@ jobs:
           echoe "Echo helpers ready at /tmp/echo_helpers.sh"
           logf "Workflow started: $(date -Iseconds)"
 
-      # ✅ 정식 주소로 Maven Wrapper 부트스트랩 (404 해결) + 플러그인 폴백
-      - name: Bootstrap Maven Wrapper (curl first, plugin fallback)
+      # ✅ Maven Wrapper: 플러그인으로 정식 생성 (curl은 검증/보조, 실패해도 통과)
+      - name: Bootstrap Maven Wrapper (plugin-first; curl verify only)
         shell: bash
         run: |
           set -Eeuo pipefail
           MW_VER=3.3.2
           MAVEN_DIST_VER=3.9.11
 
-          mkdir -p .mvn/wrapper
+          # 1) 플러그인으로 정식 wrapper 생성 (러너의 mvn 사용)
+          mvn -N -q -e org.apache.maven.plugins:maven-wrapper-plugin:${MW_VER}:wrapper \
+            -DwrapperVersion=${MW_VER} -Dmaven=${MAVEN_DIST_VER}
 
-          RAW_BASE="https://raw.githubusercontent.com/apache/maven-wrapper/maven-wrapper/maven-wrapper-${MW_VER}"
-          curl -fSLo mvnw      "${RAW_BASE}/mvnw"
-          curl -fSLo mvnw.cmd  "${RAW_BASE}/mvnw.cmd"
-          chmod +x mvnw
+          # 2) 실행권한 보장
+          chmod +x mvnw || true
 
-          JAR_PATH=".mvn/wrapper/maven-wrapper.jar"
-          curl -fSL --retry 5 --retry-delay 2 \
-            "https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" \
-            -o "${JAR_PATH}" || true
-          if [ ! -s "${JAR_PATH}" ]; then
-            curl -fSL --retry 5 --retry-delay 2 \
-              "https://repo1.maven.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar" \
-              -o "${JAR_PATH}" || true
-          fi
-
-          cat > .mvn/wrapper/maven-wrapper.properties <<PROP
-          distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_DIST_VER}/apache-maven-${MAVEN_DIST_VER}-bin.zip
-          wrapperUrl=https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/maven-wrapper/${MW_VER}/maven-wrapper-${MW_VER}.jar
-          PROP
-
-          # 폴백: jar 다운로드 실패 시 wrapper 플러그인으로 복구
-          if [ ! -s "${JAR_PATH}" ]; then
-            echo "⚠️  Could not download wrapper jar; falling back to wrapper plugin..."
-            # 러너에 기본 Maven이 있으므로 임시 사용
-            mvn -N -q org.apache.maven.plugins:maven-wrapper-plugin:${MW_VER}:wrapper \
-              -DwrapperVersion=${MW_VER} -Dmaven=${MAVEN_DIST_VER}
-          fi
+          # 3) distributionUrl 가용성 '검증'만 수행 (실패해도 빌드 계속)
+          DIST_URL="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_DIST_VER}/apache-maven-${MAVEN_DIST_VER}-bin.zip"
+          echo "Verifying Maven distribution URL (HEAD): ${DIST_URL}"
+          curl -IfsSL "${DIST_URL}" || echo "⚠️ HEAD verify failed (will proceed; wrapper will download during ./mvnw run)"
 
           echo "✅ Maven Wrapper ready (./mvnw -> Apache Maven ${MAVEN_DIST_VER})"
 
@@ -113,7 +95,6 @@ jobs:
             cmd="printf 'ECHO FILE %03d %s\n' ${i} '${ts}' > '${file}'"
             run_cmd bash -lc -- "$cmd"
           done
-          echoe "Mass gen completed: ${#DIRS[@]} dirs + 50 files"
           echo "MassGen: ${#DIRS[@]} dirs + 50 files" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate project files (sources, tests, scripts, Dockerfile, README, .gitignore, pom.xml)
@@ -200,7 +181,6 @@ jobs:
                     </dependency>
                   </dependencies>
                   <configuration>
-                    <!-- ✅ TreeWalker/JavadocPackage 충돌 없는 로컬 설정 사용 -->
                     <configLocation>.checkstyle/checkstyle.xml</configLocation>
                     <encoding>UTF-8</encoding>
                     <consoleOutput>true</consoleOutput>
@@ -255,7 +235,6 @@ jobs:
           </project>
           POM
 
-          # ✅ Checkstyle: JavadocPackage는 Checker의 직접 자식, TreeWalker 아래로 두지 않음
           cat > .checkstyle/checkstyle.xml <<'CS'
           <?xml version="1.0"?>
           <!DOCTYPE module PUBLIC
@@ -266,7 +245,6 @@ jobs:
             <module name="JavadocPackage"/>
             <module name="FileTabCharacter"/>
             <module name="NewlineAtEndOfFile"/>
-
             <module name="TreeWalker">
               <module name="LineLength">
                 <property name="max" value="120"/>
@@ -460,11 +438,11 @@ jobs:
             @Test void depositWithdrawInterest(){
               Account a=new Account(new BigDecimal("100000"));
               a.deposit(new BigDecimal("25000"), "테스트입금");
-              assertEquals(new BigDecimal("125000"), a.getBalance());
+              org.junit.jupiter.api.Assertions.assertEquals(new BigDecimal("125000"), a.getBalance());
               a.withdraw(new BigDecimal("5000"), "테스트출금");
-              assertEquals(new BigDecimal("120000"), a.getBalance());
+              org.junit.jupiter.api.Assertions.assertEquals(new BigDecimal("120000"), a.getBalance());
               a.applyInterest(new BigDecimal("3.65"), 30, "이자");
-              assertEquals(new BigDecimal("120360"), a.getBalance());
+              org.junit.jupiter.api.Assertions.assertEquals(new BigDecimal("120360"), a.getBalance());
             }
           }
           JAVA
@@ -504,7 +482,6 @@ jobs:
           source /tmp/echo_helpers.sh
           run_cmd ./mvnw -q -e -DskipTests dependency:go-offline
 
-      # ✅ Spotless 자동 적용
       - name: Maven Spotless Apply (auto-fix formatting)
         shell: bash
         continue-on-error: true
@@ -527,7 +504,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh
-          # checkstyle.xml 구조 수정으로 TreeWalker/JavadocPackage 오류 해결됨
           run_cmd ./mvnw -q -e spotless:check checkstyle:check spotbugs:spotbugs
 
       - name: Generate SBOM (CycloneDX)
@@ -636,7 +612,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ✅ 단일 플랫폼 로컬 적재
       - name: Build Docker image (load local linux/amd64)
         shell: bash
         continue-on-error: true
@@ -648,7 +623,6 @@ jobs:
             --cache-from type=gha --cache-to type=gha,mode=max \
             -t bankcalc:local --load .
 
-      # (선택) 멀티아치 푸시
       - name: GHCR Login & Multi-arch Push (best-effort)
         shell: bash
         continue-on-error: true
