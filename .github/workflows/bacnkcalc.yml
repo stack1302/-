@@ -3,20 +3,7 @@ name: "Java BankCalc — Echo Gen + Build + Test + Run + Artifacts (+Docker)"
 on:
   push:
     branches: ["main"]
-  workflow_dispatch:
-    inputs:
-      run_example:
-        description: "샘플 스크립트 실행 및 CSV 산출물 업로드"
-        type: boolean
-        default: true
-      build_docker:
-        description: "Docker 이미지 로컬 빌드 (푸시는 안 함)"
-        type: boolean
-        default: false
-      echo_mass_gen:
-        description: "EchoOps 스타일 대량 파일/디렉터리 생성"
-        type: boolean
-        default: true
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -62,8 +49,7 @@ jobs:
           echoe "Echo helpers ready at /tmp/echo_helpers.sh"
           logf "Workflow started: $(date -Iseconds)"
 
-      - name: (Optional) EchoOps mass directories/files
-        if: ${{ inputs.echo_mass_gen == true }}
+      - name: EchoOps mass directories/files (always)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -78,7 +64,6 @@ jobs:
             run_cmd mkdir -p "${BASE}/${d}"
             run_cmd touch "${BASE}/${d}/.keep"
           done
-          # 샘플 대량 파일(작은 텍스트) 50개 생성
           for i in $(seq 1 50); do
             run_cmd bash -c "printf 'ECHO FILE %03d %s\n' ${i} \"$(date -Iseconds)\" > ${BASE}/echo_reports/report_${i}.txt"
           done
@@ -365,8 +350,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Run example (optional)
-        if: ${{ inputs.run_example == true }}
+      - name: Run example (always)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -381,16 +365,14 @@ jobs:
           head -n 5 outputs/history.csv | sed 's/^/CSV> /' | tee -a "$GITHUB_STEP_SUMMARY"
           run_cmd ls -al outputs
 
-      - name: Upload outputs (optional)
-        if: ${{ inputs.run_example == true }}
+      - name: Upload outputs (always)
         uses: actions/upload-artifact@v4
         with:
           name: bankcalc-outputs
           path: outputs/**
           retention-days: 14
 
-      - name: Build Docker image (optional)
-        if: ${{ inputs.build_docker == true }}
+      - name: Build Docker image (always)
         shell: bash
         run: |
           set -Eeuo pipefail
