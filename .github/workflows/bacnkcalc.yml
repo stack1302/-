@@ -163,35 +163,18 @@ jobs:
                   <configuration>
                     <java><googleJavaFormat/></java>
                   </configuration>
-                  <executions>
-                    <execution>
-                      <goals><goal>check</goal></goals>
-                    </execution>
-                  </executions>
                 </plugin>
 
                 <plugin>
                   <groupId>org.apache.maven.plugins</groupId>
                   <artifactId>maven-checkstyle-plugin</artifactId>
                   <version>3.5.0</version>
-                  <executions>
-                    <execution>
-                      <phase>verify</phase>
-                      <goals><goal>check</goal></goals>
-                    </execution>
-                  </executions>
                 </plugin>
 
                 <plugin>
                   <groupId>com.github.spotbugs</groupId>
                   <artifactId>spotbugs-maven-plugin</artifactId>
                   <version>${spotbugs.version}</version>
-                  <executions>
-                    <execution>
-                      <phase>verify</phase>
-                      <goals><goal>spotbugs</goal></goals>
-                    </execution>
-                  </executions>
                 </plugin>
 
                 <plugin>
@@ -438,6 +421,15 @@ jobs:
           source /tmp/echo_helpers.sh
           run_cmd mvn -q -e -DskipTests dependency:go-offline
 
+      # ✅ Spotless 자동 적용(수정) → 테스트/정적분석 전
+      - name: Maven Spotless Apply (auto-fix formatting)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          source /tmp/echo_helpers.sh
+          run_cmd mvn -q -e spotless:apply
+
       - name: Maven Test
         shell: bash
         continue-on-error: true
@@ -489,16 +481,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # ✅ Trivy action: 'path' → 'input' 로 수정
       - name: Trivy scan (JAR directory)
         uses: aquasecurity/trivy-action@0.28.0
         continue-on-error: true
         with:
-          scan-type: 'fs'
-          severity: 'CRITICAL,HIGH'
+          scan-type: fs
+          input: target
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
-          format: 'table'
-          output: 'trivy-javabuild.txt'
-          path: 'target'
+          format: table
+          output: trivy-javabuild.txt
 
       - name: Upload Trivy result
         if: always()
@@ -558,18 +551,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image (buildx + cache)
+      # ✅ 단일 플랫폼 + --load (manifest list 오류 방지)
+      - name: Build Docker image (load local linux/amd64)
         shell: bash
         continue-on-error: true
         run: |
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh
           run_cmd docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --platform linux/amd64 \
             --cache-from type=gha --cache-to type=gha,mode=max \
             -t bankcalc:local --load .
 
-      - name: GHCR Login & Push (best-effort)
+      # (선택) 멀티아치 푸시: --push 사용 (이미지 존재 시 best-effort)
+      - name: GHCR Login & Multi-arch Push (best-effort)
         shell: bash
         continue-on-error: true
         run: |
@@ -577,8 +572,11 @@ jobs:
           source /tmp/echo_helpers.sh
           IMAGE="ghcr.io/${{ github.repository_owner }}/bankcalc:$(date +%Y%m%d)-${{ github.run_number }}"
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          run_cmd docker tag bankcalc:local "$IMAGE"
-          run_cmd docker push "$IMAGE"
+          # 멀티아치 푸시는 --push 사용 (로컬에 적재하지 않음)
+          run_cmd docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            -t "$IMAGE" --push .
 
       - name: Upload Echo logs
         if: always()
